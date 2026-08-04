@@ -47,8 +47,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Установка sshpass и rsync
-        run: sudo apt-get update && sudo apt-get install -y sshpass rsync
+      - name: Установка sshpass
+        run: sudo apt-get update && sudo apt-get install -y sshpass
 
       - name: Копирование кода на сервер
         env:
@@ -56,14 +56,17 @@ jobs:
           HOST: ${{ secrets.SSH_HOST }}
           PORT: ${{ secrets.SSH_PORT }}
           USER: ${{ secrets.SSH_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/emails-code' }}
         run: |
-          # rsync без --delete: серверные .env, license.key, src/_static/_media не трогаем.
-          sshpass -e rsync -az \
-            -e "ssh -p $PORT -o StrictHostKeyChecking=no" \
-            --exclude '__pycache__' --exclude '*.pyc' --exclude '*.egg-info' \
-            --exclude '.venv' --exclude '*.sqlite3' --exclude 'license.key' \
+          # tar-over-ssh: не зависит от rsync на сервере (там его нет), а tar есть
+          # везде. Без удаления лишнего — серверные .env, license.key,
+          # src/_static, src/_media не затрагиваются (их нет в архиве).
+          tar czf - \
+            --exclude='__pycache__' --exclude='*.pyc' --exclude='*.egg-info' \
+            --exclude='.venv' --exclude='*.sqlite3' --exclude='license.key' \
             app _config docker-compose.cbmail.yaml \
-            "$USER@$HOST:${{ secrets.DEPLOY_PATH || '/opt/emails-code' }}/"
+          | sshpass -e ssh -p "$PORT" -o StrictHostKeyChecking=no "$USER@$HOST" \
+              "mkdir -p '$DEPLOY_PATH' && tar xzf - -C '$DEPLOY_PATH'"
 
       - name: Пересборка образа и запуск (web + worker, порт 8002)
         env:

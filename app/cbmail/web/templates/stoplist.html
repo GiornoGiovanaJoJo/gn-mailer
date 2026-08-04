@@ -104,17 +104,35 @@
   <div class="card mt-4">
     <div class="card-header d-flex justify-content-between align-items-center">
       <h5 class="card-title mb-0"><i class="bx bx-user-x me-2 text-primary"></i>Отписались сами (кнопка в письме)</h5>
-      <span class="badge bg-label-secondary">{{ unsub_total }} шт.</span>
+      <div class="d-flex align-items-center gap-2">
+        <span class="badge bg-label-secondary">{{ unsub_total }} шт.</span>
+        {% if unsub_total %}
+        <form method="post" action="/stoplist/" class="d-inline" onsubmit="return confirm('Удалить ВСЕ отписки? Всем этим адресам снова можно будет писать.');">
+          {{ csrf_input(request)|safe }}
+          <input type="hidden" name="action" value="clear_unsub">
+          <button type="submit" class="btn btn-sm btn-label-danger"><i class="bx bx-trash me-1"></i>Очистить все</button>
+        </form>
+        {% endif %}
+      </div>
     </div>
     <div class="card-body">
-      <p class="text-body-secondary small mb-3">Эти адреса отписались по ссылке в письме. Отписка действует только на письма выбранного отправителя — от других ваших почтовых ящиков письма продолжают приходить.</p>
+      <p class="text-body-secondary small mb-3">Эти адреса отписались по ссылке в письме. Отписка действует только на письма выбранного отправителя — от других ваших почтовых ящиков письма продолжают приходить. Кнопкой удаления адрес можно вернуть в рассылку.</p>
       <div class="row">
         {% for group in unsub_groups %}
         <div class="col-md-6 col-lg-4 mb-3">
           <h6 class="text-body-secondary mb-2 pb-2 border-bottom"><i class="bx bx-envelope me-1"></i>{{ group.label }}<span class="badge bg-secondary rounded-pill ms-1">{{ group.emails|length }}</span></h6>
           <div class="email-list">
             {% for email in group.emails %}
-            <div class="email-item"><span class="email-address">{{ email }}</span></div>
+            <div class="email-item">
+              <span class="email-address">{{ email }}</span>
+              <form method="post" action="/stoplist/" class="d-inline" onsubmit="return confirm('Удалить отписку {{ email }}? Ему снова можно будет писать от этого отправителя.');">
+                {{ csrf_input(request)|safe }}
+                <input type="hidden" name="action" value="remove_unsub">
+                <input type="hidden" name="email" value="{{ email }}">
+                <input type="hidden" name="scope" value="{{ group.scope }}">
+                <button type="submit" class="btn btn-icon btn-sm btn-label-danger" title="Удалить отписку" aria-label="Удалить отписку {{ email }}"><i class="bx bx-trash"></i></button>
+              </form>
+            </div>
             {% endfor %}
           </div>
         </div>

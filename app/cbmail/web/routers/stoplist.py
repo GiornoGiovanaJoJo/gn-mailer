@@ -9,7 +9,7 @@ UI повторяет оригинал: счётчик, добавление о�
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Form, Request
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cbmail.db.models import Profile, StopListRow, Unsubscribe
@@ -64,7 +64,7 @@ async def _unsubscribes_by_sender(db: AsyncSession) -> list[dict]:
     for email, scope in rows:
         groups.setdefault(scope or "", []).append(email)
     return [
-        {"label": scope or "Все отправители (глобально)", "emails": emails}
+        {"scope": scope, "label": scope or "Все отправители (глобально)", "emails": emails}
         for scope, emails in sorted(groups.items())
     ]
 
@@ -97,8 +97,26 @@ async def update_stoplist(
     db: AsyncSession = Depends(get_db),
     action: str = Form("add_bulk"),
     email: str = Form(""),
+    scope: str = Form(""),
     bulk_emails: str = Form(""),
 ):
+    # Удаление адресных отписок (раздел «Отписались сами») — не трогает общий
+    # список. После удаления адресату снова можно писать от этого отправителя.
+    if action == "remove_unsub":
+        target = normalize_email(email)
+        await db.execute(
+            delete(Unsubscribe).where(
+                Unsubscribe.email == target, Unsubscribe.scope == (scope or "").strip().lower()
+            )
+        )
+        await db.commit()
+        return redirect("/stoplist/", ok="Отписка удалена — адресату снова можно писать.")
+
+    if action == "clear_unsub":
+        await db.execute(delete(Unsubscribe))
+        await db.commit()
+        return redirect("/stoplist/", ok="Все отписки очищены.")
+
     row = await _get_row(db)
     current = parse_emails(row.list)
     existing = {normalize_email(e) for e in current}

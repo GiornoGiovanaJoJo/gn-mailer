@@ -412,6 +412,27 @@ def test_unsubscribe_public_adds_to_stoplist(client):
     assert "client@example.com" in page
 
 
+def test_admin_can_remove_unsubscribe(client):
+    # Пользователь отписался...
+    client.get("/unsubscribe", params={"e": "buyer@example.com", "d": "pmmarketing.ru"})
+    _login(client)
+    assert "buyer@example.com" in client.get("/stoplist/").text
+    # ...админ удаляет отписку из панели — адрес исчезает из списка.
+    token = _csrf(client, "/stoplist/")
+    resp = client.post(
+        "/stoplist/",
+        data={
+            "csrfmiddlewaretoken": token,
+            "action": "remove_unsub",
+            "email": "buyer@example.com",
+            "scope": "pmmarketing.ru",
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "buyer@example.com" not in client.get("/stoplist/").text
+
+
 def test_unsubscribe_is_scoped_to_sender(client):
     # Отписка от писем одного отправителя не должна блокировать другого.
     r1 = client.get("/unsubscribe", params={"e": "buyer@example.com", "d": "pmmarketing.ru"})

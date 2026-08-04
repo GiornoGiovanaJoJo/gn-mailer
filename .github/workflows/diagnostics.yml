@@ -1,0 +1,43 @@
+name: Diagnostics
+
+# Ручная диагностика прода (Actions → Diagnostics → Run workflow).
+# Ничего не меняет: только читает БД и проверяет доступность.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Внешняя доступность (взгляд «снаружи», как у пользователя)
+        run: |
+          echo "health:      $(curl -s -o /dev/null -w '%{http_code}' --max-time 15 http://81.177.139.113:8002/health)"
+          echo "unsubscribe: $(curl -s -o /dev/null -w '%{http_code}' --max-time 15 'http://81.177.139.113:8002/unsubscribe?e=notanemail')  (400 = страница доступна, адрес невалиден — это ок)"
+
+      - name: Установка sshpass
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+
+      - name: Состояние базы отписки на сервере
+        env:
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+          HOST: ${{ secrets.SSH_HOST }}
+          PORT: ${{ secrets.SSH_PORT }}
+          USER: ${{ secrets.SSH_USER }}
+        run: |
+          sshpass -e ssh -p "$PORT" -o StrictHostKeyChecking=no "$USER@$HOST" bash -s <<'REMOTE'
+          set -e
+          PSQL="docker exec cb-mail-db psql -U admin -d db_admin -tAc"
+          echo "=== combine_body в работающем образе (1 = новый код) ==="
+          docker exec cbmail-web sh -c "grep -c 'def combine_body' /app/cbmail/domain/composer.py" || true
+          echo "=== PUBLIC_BASE_URL ==="
+          docker exec cbmail-web sh -c 'echo $PUBLIC_BASE_URL'
+          echo "=== cbmail_unsubscribe (email | scope) ==="
+          $PSQL "select email || '  |  ' || coalesce(scope,'(пусто=глобально)') from cbmail_unsubscribe order by id" || echo "таблицы нет/пусто"
+          echo "=== mail_stoplist (общий ручной блок) ==="
+          $PSQL "select coalesce(list,'(пусто)') from mail_stoplist" || echo "пусто"
+          echo "=== SMTP-профили (домен отправителя определяет область отписки) ==="
+          $PSQL "select id || '  |  ' || coalesce(title,'') || '  | host=' || coalesce(email_host,'') || '  | login=' || coalesce(email_host_user,'') || '  | from=' || coalesce(default_from_email,'') from mail_usersettingssmtp order by id" || echo "нет профилей"
+          echo "=== кампании (id | статус | from_email | smtp_id) ==="
+          $PSQL "select id || '  |  ' || status || '  |  from=' || coalesce(from_email,'') || '  |  smtp=' || coalesce(use_smtp_settings_id::text,'-') from mail_massmailcampaign order by id desc limit 10" || echo "нет кампаний"
+          REMOTE

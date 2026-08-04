@@ -1,0 +1,38 @@
+name: Stoplist clear
+
+# Очистка ОБЩЕГО стоп-листа (mail_stoplist) — ручной запуск с подтверждением.
+# Общий стоп-лист блокирует адрес у ВСЕХ отправителей. Адресные отписки живут в
+# отдельной таблице cbmail_unsubscribe и этим действием не затрагиваются.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Введите YES, чтобы очистить общий стоп-лист'
+        required: true
+        default: 'NO'
+
+jobs:
+  clear:
+    if: ${{ inputs.confirm == 'YES' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Установка sshpass
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+
+      - name: Очистка mail_stoplist
+        env:
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+          HOST: ${{ secrets.SSH_HOST }}
+          PORT: ${{ secrets.SSH_PORT }}
+          USER: ${{ secrets.SSH_USER }}
+        run: |
+          sshpass -e ssh -p "$PORT" -o StrictHostKeyChecking=no "$USER@$HOST" bash -s <<'REMOTE'
+          set -e
+          PSQL="docker exec cb-mail-db psql -U admin -d db_admin"
+          echo "=== было ==="
+          $PSQL -tAc "select coalesce(list,'(пусто)') from mail_stoplist"
+          $PSQL -c "update mail_stoplist set list=''"
+          echo "=== стало ==="
+          $PSQL -tAc "select coalesce(nullif(list,''),'(пусто)') from mail_stoplist"
+          REMOTE

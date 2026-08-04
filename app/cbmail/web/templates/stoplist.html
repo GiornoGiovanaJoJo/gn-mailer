@@ -1,0 +1,127 @@
+{% extends "base_sneat.html" %}
+{% block title %}Стоп-лист{% endblock %}
+{% block head %}
+<style>
+  .email-list { max-height: 460px; overflow-y: auto; }
+  .email-item { display:flex; justify-content:space-between; align-items:center; padding:.5rem 0; border-bottom:1px solid var(--bs-border-color); }
+  .email-item:last-child { border-bottom:none; }
+  .email-address { font-family:'Courier New',monospace; font-size:.8rem; word-break:break-all; }
+</style>
+{% endblock %}
+{% block content %}
+<div class="col-12">
+  <!-- Статистика -->
+  <div class="row g-4 mb-4">
+    <div class="col-sm-6 col-xl-3">
+      <div class="card h-100">
+        <div class="card-body">
+          <div class="d-flex align-items-start justify-content-between">
+            <div>
+              <span class="text-heading">Стоп-лист</span>
+              <div class="d-flex align-items-center my-1"><h4 class="mb-0 me-2">{{ total_count }}</h4></div>
+              <small class="text-body-secondary">Заблокированных адресов</small>
+            </div>
+            <div class="avatar"><span class="avatar-initial rounded bg-label-danger"><i class="icon-base bx bx-block icon-lg"></i></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <!-- Формы добавления -->
+    <div class="col-lg-4">
+      <div class="card mb-4">
+        <div class="card-header"><h5 class="card-title mb-0"><i class="bx bx-plus-circle me-2 text-primary"></i>Добавить email</h5></div>
+        <div class="card-body">
+          <form method="post" action="/stoplist/">
+            {{ csrf_input(request)|safe }}
+            <input type="hidden" name="action" value="add_single">
+            <div class="mb-3">
+              <label class="form-label" for="sl_email">Email-адрес</label>
+              <input type="email" id="sl_email" name="email" class="form-control" placeholder="user@example.com" required autocomplete="off">
+            </div>
+            <button type="submit" class="btn btn-primary w-100"><i class="bx bx-plus me-1"></i>Добавить</button>
+          </form>
+        </div>
+      </div>
+      <div class="card mb-4">
+        <div class="card-header"><h5 class="card-title mb-0"><i class="bx bx-layer me-2 text-primary"></i>Массовое добавление</h5></div>
+        <div class="card-body">
+          <form method="post" action="/stoplist/">
+            {{ csrf_input(request)|safe }}
+            <input type="hidden" name="action" value="add_bulk">
+            <div class="mb-3">
+              <label class="form-label" for="sl_bulk">Список email-адресов</label>
+              <textarea id="sl_bulk" name="bulk_emails" class="form-control" rows="6" placeholder="mail1@example.com, mail2@example.com&#10;mail3@example.com" required></textarea>
+              <div class="form-text">Разделители: запятые, пробелы, переводы строк.</div>
+            </div>
+            <button type="submit" class="btn btn-label-primary w-100"><i class="bx bx-upload me-1"></i>Массовое добавление</button>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <!-- Список -->
+    <div class="col-lg-8">
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <h5 class="card-title mb-0"><i class="bx bx-list-ul me-2 text-primary"></i>Заблокированные адреса</h5>
+          <span class="badge bg-label-danger">{{ total_count }} шт.</span>
+        </div>
+        <div class="card-body">
+          <div class="row">
+            {% for column in columns %}
+            <div class="col-md-4">
+              <h6 class="text-body-secondary mb-3 pb-2 border-bottom">Колонка {{ loop.index }}<span class="badge bg-primary rounded-pill ms-1">{{ column|length }}</span></h6>
+              <div class="email-list">
+                {% if column %}
+                  {% for email in column %}
+                  <div class="email-item">
+                    <span class="email-address"><i class="bx bx-envelope me-1 text-body-secondary"></i>{{ email }}</span>
+                    <form method="post" action="/stoplist/" class="d-inline" onsubmit="return confirm('Удалить {{ email }} из стоп-листа?');">
+                      {{ csrf_input(request)|safe }}
+                      <input type="hidden" name="action" value="remove">
+                      <input type="hidden" name="email" value="{{ email }}">
+                      <button type="submit" class="btn btn-icon btn-sm btn-label-danger" title="Удалить" aria-label="Удалить {{ email }}"><i class="bx bx-trash"></i></button>
+                    </form>
+                  </div>
+                  {% endfor %}
+                {% else %}
+                  <div class="text-center text-body-secondary py-4"><i class="bx bx-inbox bx-lg d-block mb-2"></i><small>Нет адресов</small></div>
+                {% endif %}
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {% if unsub_groups %}
+  <!-- Отписавшиеся по кнопке в письме (только для сведения) -->
+  <div class="card mt-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <h5 class="card-title mb-0"><i class="bx bx-user-x me-2 text-primary"></i>Отписались сами (кнопка в письме)</h5>
+      <span class="badge bg-label-secondary">{{ unsub_total }} шт.</span>
+    </div>
+    <div class="card-body">
+      <p class="text-body-secondary small mb-3">Эти адреса отписались по ссылке в письме. Отписка действует только на письма выбранного отправителя — от других ваших почтовых ящиков письма продолжают приходить.</p>
+      <div class="row">
+        {% for group in unsub_groups %}
+        <div class="col-md-6 col-lg-4 mb-3">
+          <h6 class="text-body-secondary mb-2 pb-2 border-bottom"><i class="bx bx-envelope me-1"></i>{{ group.label }}<span class="badge bg-secondary rounded-pill ms-1">{{ group.emails|length }}</span></h6>
+          <div class="email-list">
+            {% for email in group.emails %}
+            <div class="email-item"><span class="email-address">{{ email }}</span></div>
+            {% endfor %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

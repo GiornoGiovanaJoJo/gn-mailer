@@ -1,0 +1,91 @@
+name: CI/CD
+
+# Тесты гоняются на каждый push и PR. Деплой на прод — только при push в main
+# (или вручную через «Run workflow») и лишь после зелёных тестов.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Тесты и линтер
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Установка зависимостей
+        working-directory: app
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[dev]"
+
+      - name: Линтер (ruff)
+        working-directory: app
+        run: ruff check .
+
+      - name: Тесты (pytest)
+        working-directory: app
+        run: pytest -q
+
+  deploy:
+    name: Деплой на прод
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    concurrency:
+      # Два деплоя одновременно недопустимы — второй ждёт или отменяется.
+      group: production-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установка sshpass и rsync
+        run: sudo apt-get update && sudo apt-get install -y sshpass rsync
+
+      - name: Копирование кода на сервер
+        env:
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+          HOST: ${{ secrets.SSH_HOST }}
+          PORT: ${{ secrets.SSH_PORT }}
+          USER: ${{ secrets.SSH_USER }}
+        run: |
+          # rsync без --delete: серверные .env, license.key, src/_static/_media не трогаем.
+          sshpass -e rsync -az \
+            -e "ssh -p $PORT -o StrictHostKeyChecking=no" \
+            --exclude '__pycache__' --exclude '*.pyc' --exclude '*.egg-info' \
+            --exclude '.venv' --exclude '*.sqlite3' --exclude 'license.key' \
+            app _config docker-compose.cbmail.yaml \
+            "$USER@$HOST:${{ secrets.DEPLOY_PATH || '/opt/emails-code' }}/"
+
+      - name: Пересборка образа и запуск (web + worker, порт 8002)
+        env:
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+          HOST: ${{ secrets.SSH_HOST }}
+          PORT: ${{ secrets.SSH_PORT }}
+          USER: ${{ secrets.SSH_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/emails-code' }}
+        run: |
+          sshpass -e ssh -p "$PORT" -o StrictHostKeyChecking=no "$USER@$HOST" bash -s <<'REMOTE'
+          set -e
+          cd "${DEPLOY_PATH:-/opt/emails-code}"
+          COMPOSE="docker compose -f docker-compose.cbmail.yaml"
+          export CBMAIL_PORT=8002
+          $COMPOSE build cbmail-web
+          $COMPOSE up -d --force-recreate cbmail-web
+          $COMPOSE --profile worker up -d --force-recreate cbmail-worker
+          echo "Ожидание health..."
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8002/health || echo 000)
+            if [ "$code" = "200" ]; then echo "health 200 (за $i)"; exit 0; fi
+            sleep 2
+          done
+          echo "health не поднялся до 200"; docker logs cbmail-web --tail 30; exit 1
+          REMOTE

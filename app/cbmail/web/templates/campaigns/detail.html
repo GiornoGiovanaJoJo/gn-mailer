@@ -1,0 +1,83 @@
+{% extends "base_sneat.html" %}
+{% block title %}{{ campaign.name }}{% endblock %}
+{% block head %}
+{# Пока рассылка идёт — страница сама обновляется, чтобы прогресс был виден без F5. #}
+{% if campaign.status == 'sending' %}<meta http-equiv="refresh" content="10">{% endif %}
+{% endblock %}
+{% block content %}
+{% set c = campaign %}
+<div class="col-12">
+  <div class="d-flex justify-content-between align-items-center mb-4">
+    <div class="d-flex align-items-center gap-2">
+      <h5 class="mb-0">{{ c.name }}</h5>
+      <span class="badge bg-label-{{ c.status|status_badge }}">{{ c.status|status_label }}</span>
+      {% if c.status == 'sending' %}<span class="text-warning d-inline-flex align-items-center small"><span class="spinner-border spinner-border-sm me-1"></span>идёт отправка… <span class="text-body-secondary ms-1">(страница обновляется)</span></span>{% endif %}
+    </div>
+    <a href="/campaigns/" class="btn btn-outline-secondary btn-sm"><i class="bx bx-arrow-back me-1"></i>К списку</a>
+  </div>
+
+  <div class="card shadow-sm mb-4">
+    <div class="card-body">
+      <div class="d-flex gap-2 mb-4">
+        {% if c.status in ['draft','cancelled','scheduled'] %}
+        <a href="/campaigns/{{ c.id }}/edit" class="btn btn-outline-primary"><i class="bx bx-edit me-1"></i>Редактировать</a>
+        <form method="post" action="/campaigns/{{ c.id }}/send" class="d-inline" onsubmit="return confirm('Запустить отправку сейчас?')">{{ csrf_input(request)|safe }}<button class="btn btn-success"><i class="bx bx-send me-1"></i>Отправить сейчас</button></form>
+        {% endif %}
+        {% if stoppable %}
+        <form method="post" action="/campaigns/{{ c.id }}/stop" class="d-inline" onsubmit="return confirm('Остановить рассылку? Кампания сохранится.')">{{ csrf_input(request)|safe }}<button class="btn btn-warning"><i class="bx bx-stop-circle me-1"></i>Стоп</button></form>
+        {% endif %}
+        <form method="post" action="/campaigns/{{ c.id }}/delete" class="d-inline" onsubmit="return confirm('Удалить кампанию безвозвратно?')">{{ csrf_input(request)|safe }}<button class="btn btn-outline-danger"><i class="bx bx-trash me-1"></i>Удалить</button></form>
+      </div>
+      <div class="progress mb-3" style="height:8px"><div class="progress-bar" style="width:{{ c.progress_percent }}%"></div></div>
+      <div class="row text-center">
+        <div class="col"><div class="text-body-secondary small">Всего адресатов</div><h4 class="mb-0">{{ c.total_recipients }}</h4></div>
+        <div class="col"><div class="text-body-secondary small">Отправлено</div><h4 class="mb-0 text-success">{{ c.sent_count }}</h4></div>
+        <div class="col"><div class="text-body-secondary small">Ошибок</div><h4 class="mb-0 text-danger">{{ c.failed_count }}</h4></div>
+        <div class="col"><div class="text-body-secondary small">Прогресс</div><h4 class="mb-0">{{ c.progress_percent }}%</h4></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-4">
+    <div class="card-header"><h6 class="mb-0">Параметры</h6></div>
+    <div class="card-body">
+      <table class="table table-sm mb-0">
+        <tr><th style="width:220px">Тема</th><td>{{ c.subject }}</td></tr>
+        <tr><th>Профиль SMTP</th><td>{{ c.smtp.label if c.smtp else '— по умолчанию —' }}</td></tr>
+        <tr><th>Отправитель</th><td>{{ c.from_name or '' }} {{ ('<' ~ c.from_email ~ '>') if c.from_email else '' }}</td></tr>
+        <tr><th>Пачка / интервал</th><td>{{ c.message_count }} писем · {{ c.message_interval }} сек</td></tr>
+        <tr><th>Запланирована на</th><td>{{ c.scheduled_time.strftime('%d.%m.%Y %H:%M') if c.scheduled_time else '—' }}</td></tr>
+        <tr><th>Вложений</th><td>{{ c.attachments|length }}</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <div class="card shadow-sm">
+    <div class="card-header d-flex align-items-center gap-2 flex-wrap">
+      <h6 class="mb-0 me-2">Журнал отправки</h6>
+      {% for st, n in log_counts.items() %}<span class="badge bg-label-{{ 'success' if st=='sent' else ('danger' if st=='failed' else 'secondary') }}">{{ st }}: {{ n }}</span>{% endfor %}
+      {% if not log_counts %}<span class="text-body-secondary small">Записей пока нет.</span>{% endif %}
+    </div>
+    <div class="card-body">
+      {% if logs %}
+      <div class="table-responsive">
+        <table class="table table-sm table-hover align-middle">
+          <thead class="table-light"><tr><th>Адрес</th><th>Статус</th><th>Сообщение</th><th>Время</th></tr></thead>
+          <tbody>
+          {% for l in logs %}
+            <tr>
+              <td>{{ l.email }}</td>
+              <td><span class="badge bg-label-{{ 'success' if l.status=='sent' else ('danger' if l.status=='failed' else 'secondary') }}">{{ l.status }}</span></td>
+              <td class="text-body-secondary small">{{ l.error_message or '' }}</td>
+              <td class="text-body-secondary small">{{ l.created_at.strftime('%d.%m %H:%M:%S') if l.created_at else '' }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="text-body-secondary small mt-2">Показаны последние {{ logs|length }} записей.</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,89 @@
+{% extends "base_sneat.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block head %}
+<style>
+  #editor-iframe { width:100%; height:700px; border:1px solid #d9dee3; border-radius:6px; margin:15px 0; display:block; }
+  #editor-loading { display:flex; align-items:center; justify-content:center; height:700px; border:1px solid #d9dee3; border-radius:6px; margin:15px 0; color:#8592a3; }
+  #id_mask, #id_mask_json { display:none; }
+</style>
+{% endblock %}
+{% block content %}
+{% set t = template %}
+<div class="col-12">
+  <div class="card shadow-sm">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <h5 class="mb-0">{{ title }}</h5>
+      <a href="/templates/" class="btn btn-outline-secondary btn-sm"><i class="bx bx-arrow-back me-1"></i>К списку</a>
+    </div>
+    <div class="card-body">
+      <form method="post" action="{{ action }}" id="template-form">
+        {{ csrf_input(request)|safe }}
+        <div class="mb-2">
+          <label class="form-label" for="id_name">Название шаблона</label>
+          <input type="text" class="form-control" id="id_name" name="name" value="{{ t.name if t else '' }}" placeholder="Например: Приветственное письмо">
+        </div>
+        <div id="editor-loading">Загрузка редактора…</div>
+        <iframe id="editor-iframe" src="/static/moderation/libs/emailbuilder/index.html" style="display:none;" allowfullscreen></iframe>
+        <textarea id="id_mask" name="mask">{{ t.mask if t and t.mask else '' }}</textarea>
+        <textarea id="id_mask_json" name="mask_json">{{ t.mask_json if t and t.mask_json else '' }}</textarea>
+        <div class="d-flex gap-2 pt-3 border-top">
+          <button type="submit" id="submit-btn" class="btn btn-primary">{{ 'Сохранить' if t else 'Создать' }}</button>
+          <a href="/templates/" class="btn btn-outline-secondary">Отмена</a>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block extra_js_bottom %}
+<script>
+  let editorReady = false;
+  const iframe = document.getElementById('editor-iframe');
+  const loading = document.getElementById('editor-loading');
+  const submitBtn = document.getElementById('submit-btn');
+
+  const existingJsonRaw = document.getElementById('id_mask_json').value;
+  let existingDocument = null;
+  if (existingJsonRaw && existingJsonRaw.trim()) {
+    try { existingDocument = JSON.parse(existingJsonRaw); } catch (e) { console.warn('bad mask_json', e); }
+  }
+
+  function sendExistingDocument() {
+    if (!existingDocument || !iframe || !iframe.contentWindow) return;
+    try { iframe.contentWindow.postMessage({ type: 'loadDocument', document: existingDocument }, '*'); } catch (_) {}
+  }
+
+  function markEditorReady() {
+    if (editorReady) return;
+    editorReady = true;
+    loading.style.display = 'none';
+    iframe.style.display = 'block';
+    sendExistingDocument();
+    setTimeout(sendExistingDocument, 100);
+    setTimeout(sendExistingDocument, 400);
+    setTimeout(sendExistingDocument, 1000);
+  }
+
+  if (iframe) {
+    iframe.addEventListener('load', markEditorReady);
+    setTimeout(markEditorReady, 8000);
+  }
+
+  window.addEventListener('message', function (event) {
+    if (event.data && event.data.type === 'emailBuilderReady') markEditorReady();
+    if (event.data && event.data.type === 'document') {
+      document.getElementById('id_mask').value = event.data.html || '';
+      document.getElementById('id_mask_json').value = JSON.stringify(event.data.document || {});
+      document.getElementById('template-form').submit();
+    }
+  });
+
+  document.getElementById('template-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    if (!editorReady) { alert('Редактор ещё загружается, подождите.'); return; }
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Сохранение…';
+    iframe.contentWindow.postMessage({ type: 'getDocument' }, '*');
+  });
+</script>
+{% endblock %}

@@ -1,0 +1,82 @@
+{% extends "base_sneat.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block content %}
+<div class="col-12">
+  <div class="card shadow-sm">
+    <div class="card-header d-flex justify-content-between align-items-center py-3 flex-wrap gap-2">
+      <div>
+        <h5 class="mb-0"><i class="bx bx-envelope me-2 text-primary"></i>{{ title }}</h5>
+        <small class="text-body-secondary">{% if all_users %}Письма всех пользователей{% else %}Ваши письма{% endif %}</small>
+      </div>
+      {% if not all_users %}<a href="/messages/new" class="btn btn-primary btn-sm"><i class="bx bx-plus me-1"></i>Новое письмо</a>{% endif %}
+    </div>
+    {% if not all_users %}
+    <div class="card-body pb-0">
+      <ul class="nav nav-pills mb-3 flex-wrap">
+        <li class="nav-item"><a class="nav-link {{ 'active' if box != 'trash' and not active_dir }}" href="/messages/"><i class="bx bx-inbox me-1"></i>Входящие</a></li>
+        <li class="nav-item"><a class="nav-link {{ 'active' if box == 'trash' }}" href="/messages/?box=trash"><i class="bx bx-trash me-1"></i>Корзина</a></li>
+        {% for f in folders %}
+        <li class="nav-item"><a class="nav-link {{ 'active' if active_dir == f.id }}" href="/messages/?dir={{ f.id }}"><i class="bx bx-folder me-1"></i>{{ f.name }}</a></li>
+        {% endfor %}
+      </ul>
+      <form method="post" action="/messages/folders" class="d-flex gap-2 mb-3" style="max-width:340px">
+        {{ csrf_input(request)|safe }}
+        <input type="text" name="name" class="form-control form-control-sm" placeholder="Новая папка" aria-label="Название новой папки">
+        <button class="btn btn-outline-primary btn-sm" type="submit">Создать</button>
+      </form>
+    </div>
+    {% endif %}
+    <div class="card-body pt-0">
+    {% if page.items %}
+      <div class="table-responsive">
+        <table class="table table-hover align-middle">
+          <thead class="table-light"><tr><th style="width:44px"><span class="visually-hidden">Избранное</span></th><th>Тема</th><th>Получатели</th><th>Тип</th><th>Дата</th><th class="text-end">Действия</th></tr></thead>
+          <tbody>
+          {% for m in page.items %}
+            <tr>
+              <td>
+                <form method="post" action="/messages/{{ m.id }}/star" class="d-inline">{{ csrf_input(request)|safe }}<button class="btn btn-sm btn-icon btn-text-secondary p-0 border-0" title="{{ 'Убрать из избранного' if star_map[m.id] else 'В избранное' }}" aria-label="{{ 'Убрать из избранного' if star_map[m.id] else 'В избранное' }}"><i class="bx {{ 'bxs-star text-warning' if star_map[m.id] else 'bx-star text-body-secondary' }}"></i></button></form>
+              </td>
+              <td>
+                <a href="/messages/{{ m.id }}" class="text-body {{ 'fw-bold' if not read_map[m.id] else 'fw-medium' }}">{{ m.subject or '(без темы)' }}</a>
+                {% if m.custom_id %}<div class="text-body-secondary small">№ {{ m.custom_id }}</div>{% endif %}
+              </td>
+              <td class="text-body-secondary text-truncate" style="max-width:240px">{{ m.clients or '—' }}</td>
+              <td><span class="badge bg-label-{{ 'primary' if m.message_type == 'outgoing' else 'info' }}">{{ 'Исходящее' if m.message_type == 'outgoing' else 'Входящее' }}</span></td>
+              <td class="text-body-secondary small">{{ m.created_at.strftime('%d.%m.%Y %H:%M') if m.created_at else '' }}</td>
+              <td class="text-end">
+                <div class="btn-group">
+                  <form method="post" action="/messages/{{ m.id }}/read" class="d-inline">{{ csrf_input(request)|safe }}<button class="btn btn-sm btn-outline-secondary" title="{{ 'Отметить непрочитанным' if read_map[m.id] else 'Отметить прочитанным' }}" aria-label="{{ 'Отметить непрочитанным' if read_map[m.id] else 'Отметить прочитанным' }}"><i class="bx {{ 'bx-envelope-open' if read_map[m.id] else 'bx-envelope' }}"></i></button></form>
+                  {% if folders and box != 'trash' %}
+                  <button type="button" class="btn btn-sm btn-outline-primary dropdown-toggle" data-bs-toggle="dropdown" title="В папку" aria-label="Переместить в папку"><i class="bx bx-folder"></i></button>
+                  <ul class="dropdown-menu dropdown-menu-end">
+                    {% for f in folders %}<li><form method="post" action="/messages/{{ m.id }}/move">{{ csrf_input(request)|safe }}<input type="hidden" name="dir_id" value="{{ f.id }}"><button class="dropdown-item" type="submit">{{ f.name }}</button></form></li>{% endfor %}
+                    <li><hr class="dropdown-divider"></li>
+                    <li><form method="post" action="/messages/{{ m.id }}/move">{{ csrf_input(request)|safe }}<button class="dropdown-item" type="submit">Убрать из папок</button></form></li>
+                  </ul>
+                  {% endif %}
+                  {% if box == 'trash' %}
+                  <form method="post" action="/messages/{{ m.id }}/restore" class="d-inline">{{ csrf_input(request)|safe }}<button class="btn btn-sm btn-outline-success" title="Восстановить" aria-label="Восстановить письмо"><i class="bx bx-undo"></i></button></form>
+                  {% else %}
+                  <form method="post" action="/messages/{{ m.id }}/trash" class="d-inline">{{ csrf_input(request)|safe }}<button class="btn btn-sm btn-outline-danger" title="В корзину" aria-label="Переместить в корзину"><i class="bx bx-trash"></i></button></form>
+                  {% endif %}
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% set qs = ('dir=' ~ active_dir ~ '&') if active_dir else ('box=' ~ box ~ '&') %}
+      {% include '_pagination.html' %}
+    {% else %}
+      <div class="text-center py-5">
+        <i class="bx {{ 'bx-trash' if box == 'trash' else 'bx-envelope' }}" style="font-size:56px;color:#c7c3e0"></i>
+        <h6 class="mt-3">{{ 'Корзина пуста' if box == 'trash' else 'Писем пока нет' }}</h6>
+        <p class="text-body-secondary mb-0">{{ 'Удалённые письма появятся здесь.' if box == 'trash' else 'Здесь появятся ваши письма.' }}</p>
+      </div>
+    {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

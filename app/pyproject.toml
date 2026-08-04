@@ -1,0 +1,85 @@
+[project]
+name = "cbmail"
+version = "1.0.0"
+description = "Почтовая рассылка: FastAPI + SQLAlchemy. Замена Django-версии."
+requires-python = ">=3.10"
+
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.34.0",
+    "sqlalchemy[asyncio]==2.0.36",
+    "asyncpg==0.30.0",
+    "psycopg[binary]==3.2.3",
+    "alembic==1.14.0",
+    "pydantic==2.10.4",
+    "pydantic-settings==2.7.0",
+    "jinja2==3.1.5",
+    "python-multipart==0.0.20",
+    "itsdangerous==2.2.0",
+    "passlib==1.7.4",
+    "cryptography==44.0.0",
+    "celery[redis]==5.4.0",
+    "redis==5.2.1",
+    "aiosmtplib==3.0.2",
+    "openpyxl==3.1.5",
+    "xlrd==2.0.1",
+    "pillow==11.1.0",
+    "email-validator==2.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.25.0",
+    "pytest-cov==6.0.0",
+    "httpx==0.28.1",
+    "aiosqlite==0.20.0",
+    "aiosmtpd==1.4.6",
+    "ruff==0.8.4",
+    "mypy==1.14.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["error::DeprecationWarning:cbmail.*"]
+markers = [
+    "regression: тест воспроизводит конкретный дефект Django-версии (см. docs/BUGS.md)",
+    "integration: требует БД или SMTP-заглушку",
+]
+
+[tool.coverage.run]
+source = ["cbmail"]
+omit = ["*/migrations/*", "*/__main__.py"]
+
+[tool.ruff]
+line-length = 120
+# Целевая версия — 3.10: иначе ruff предлагает конструкции вроде datetime.UTC,
+# появившиеся только в 3.11, и код перестаёт запускаться на целевом интерпретаторе.
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
+ignore = [
+    "B008",    # FastAPI Depends() в аргументах по умолчанию — это идиома
+    "RUF001",  # Проект русскоязычный: кириллица в строках и комментариях —
+    "RUF002",  # норма, а не «неоднозначный символ». Без этого правила
+    "RUF003",  # выдают сотни ложных срабатываний на каждый комментарий.
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Конфигурация окружения должна быть выставлена до импорта модулей приложения.
+"tests/conftest.py" = ["E402"]
+# _utcnow объявлена до импортов намеренно (см. docstring в models.py): её
+# используют server_default'ы, а порядок объявления держит логику рядом.
+"cbmail/db/models.py" = ["E402"]
+# devserver выставляет переменные окружения до импорта приложения.
+"tools/devserver.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = []
+disallow_untyped_decorators = false

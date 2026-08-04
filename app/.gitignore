@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Виртуальное окружение (в репозиторий не идёт)
+.venv/
+venv/
+
+# Тесты и анализ
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Данные приложения / локальный dev-сервер
+*.db
+*.sqlite3
+_devserver.sqlite3
+_media/
+_logs/
+
+# Окружение
+.env
+.env.local

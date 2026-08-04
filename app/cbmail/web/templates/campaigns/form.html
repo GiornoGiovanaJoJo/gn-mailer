@@ -1,0 +1,120 @@
+{% extends "base_sneat.html" %}
+{% block title %}{{ 'Редактирование' if campaign and campaign.id else 'Новая рассылка' }}{% endblock %}
+{% block content %}
+{% set c = campaign %}
+{% set sched = '' %}
+{% if c and c.scheduled_time %}
+  {% if c.scheduled_time is string %}{% set sched = c.scheduled_time %}
+  {% else %}{% set sched = c.scheduled_time.strftime('%Y-%m-%dT%H:%M') %}{% endif %}
+{% endif %}
+<div class="col-12">
+  <div class="d-flex justify-content-between align-items-center mb-4">
+    <h5 class="mb-0">{{ 'Редактирование кампании' if c and c.id else 'Новая рассылка' }}</h5>
+    <a href="/campaigns/" class="btn btn-outline-secondary btn-sm"><i class="bx bx-arrow-back me-1"></i>К списку</a>
+  </div>
+  <form method="post" action="{{ action }}" enctype="multipart/form-data">
+    {{ csrf_input(request)|safe }}
+    {% if not profiles %}
+    <div class="alert alert-warning d-flex align-items-center">
+      <i class="bx bx-error-circle me-2" style="font-size:1.3rem"></i>
+      <div>Чтобы письма ушли, сначала подключите почтовый ящик в разделе <a href="/smtp/" class="alert-link fw-semibold">«Настройки»</a>. Без него рассылку можно сохранить, но не отправить.</div>
+    </div>
+    {% endif %}
+    <div class="card shadow-sm mb-4">
+      <div class="card-body">
+        <div class="mb-3"><label class="form-label" for="c_name">Название кампании</label><input type="text" id="c_name" name="name" class="form-control" value="{{ c.name if c else '' }}" placeholder="Например: Летняя акция" autocomplete="off"></div>
+        <div class="mb-3"><label class="form-label" for="c_subject">Тема письма</label><input type="text" id="c_subject" name="subject" class="form-control" value="{{ c.subject if c else '' }}" autocomplete="off"></div>
+        {% if templates %}
+        <div class="mb-3">
+          <label class="form-label" for="tpl-select">Готовый шаблон <span class="text-body-secondary">(по желанию)</span></label>
+          <div class="input-group">
+            <select id="tpl-select" name="template_id" class="form-select">
+              <option value="">— без шаблона —</option>
+              {% for t in templates %}<option value="{{ t.id }}" {% if c and c.template_id and c.template_id|string == t.id|string %}selected{% endif %}>{{ t.name or ('Шаблон #' ~ t.id) }}</option>{% endfor %}
+            </select>
+            <a id="tpl-preview" class="btn btn-outline-primary disabled" target="_blank" rel="noopener" href="#">Посмотреть шаблон</a>
+          </div>
+          <div class="form-text">Оформление шаблона добавится в письмо при отправке — вставлять его в поле не нужно.</div>
+        </div>
+        {% endif %}
+        <div class="mb-1"><label class="form-label" for="msg-body">Текст письма <span class="text-body-secondary">(по желанию, если выбран шаблон)</span></label>
+          <textarea name="message" id="msg-body" class="form-control" rows="10" placeholder="Здравствуйте!&#10;&#10;Напишите здесь текст письма…">{{ c.message if c else '' }}</textarea></div>
+        <div class="form-text mb-2">Можно: только написать текст, только выбрать шаблон, или совместить. При совмещении сверху будет ваш текст, ниже — оформление шаблона.</div>
+        <div class="alert alert-success py-2 px-3 mb-0" style="font-size:.875rem">
+          <i class="bx bx-check-circle me-1"></i>Ссылка <strong>«Отписаться»</strong> добавится в конец каждого письма <strong>автоматически</strong> — вставлять её самому не нужно.
+        </div>
+        <details class="mt-2">
+          <summary class="text-body-secondary small" style="cursor:pointer">Для опытных: подстановки в тексте</summary>
+          <div class="form-text mt-1">
+            <code>{{ '{{email}}' }}</code> — подставит адрес получателя в текст.<br>
+            <code>{{ '{{unsubscribe_url}}' }}</code> — если вставите сами, ссылка отписки встанет именно туда (иначе — в конец письма).
+          </div>
+        </details>
+      </div>
+    </div>
+    <div class="card shadow-sm mb-4">
+      <div class="card-body">
+        <div class="mb-3"><label class="form-label" for="c_recipients">Кому отправить — список адресов</label>
+          <textarea id="c_recipients" name="recipient_emails" class="form-control" rows="5" placeholder="ivan@mail.ru, petr@mail.ru&#10;anna@mail.ru">{{ c.recipient_emails if c else '' }}</textarea>
+          <div class="form-text">Впишите email-адреса через запятую или каждый с новой строки. Повторы уберём сами.</div></div>
+        <div class="mb-0"><label class="form-label" for="c_stoplist">Кого НЕ отправлять <span class="text-body-secondary">(по желанию)</span></label>
+          <textarea id="c_stoplist" name="stop_list" class="form-control" rows="2" placeholder="Адреса, которые нужно пропустить в этой рассылке">{{ c.stop_list if c else '' }}</textarea></div>
+      </div>
+    </div>
+    <div class="card shadow-sm mb-4">
+      <div class="card-body">
+        <div class="row g-3">
+          <div class="col-md-4"><label class="form-label" for="c_smtp">С какой почты отправлять</label>
+            <select id="c_smtp" name="use_smtp_settings_id" class="form-select">
+              <option value="">— по умолчанию —</option>
+              {% for p in profiles %}<option value="{{ p.id }}" {% if c and c.use_smtp_settings_id == p.id %}selected{% endif %}>{{ p.label }}</option>{% endfor %}
+            </select>
+            <div class="form-text">Ящики настраиваются в разделе «Настройки».</div></div>
+          <div class="col-md-4"><label class="form-label" for="c_from_name">Имя отправителя <span class="text-body-secondary">(по желанию)</span></label><input type="text" id="c_from_name" name="from_name" class="form-control" value="{{ c.from_name if c and c.from_name else '' }}" placeholder="Например: Магазин «Ромашка»" autocomplete="off"></div>
+          <div class="col-md-4"><label class="form-label" for="c_from_email">Адрес отправителя <span class="text-body-secondary">(по желанию)</span></label><input type="text" id="c_from_email" name="from_email" class="form-control" value="{{ c.from_email if c and c.from_email else '' }}" autocomplete="off"></div>
+          <div class="col-md-4"><label class="form-label" for="c_count">Сколько писем за раз</label><input type="number" id="c_count" name="message_count" class="form-control" value="{{ c.message_count if c else 50 }}" min="1" max="1000">
+            <div class="form-text">Можно оставить 50.</div></div>
+          <div class="col-md-4"><label class="form-label" for="c_interval">Пауза между письмами, сек</label><input type="number" id="c_interval" name="message_interval" class="form-control" value="{{ c.message_interval if c else 2 }}" min="0">
+            <div class="form-text">Чтобы не попасть в спам. Можно оставить 2.</div></div>
+          <div class="col-md-4"><label class="form-label" for="c_scheduled">Когда отправить <span class="text-body-secondary">(для «Запланировать»)</span></label><input type="datetime-local" id="c_scheduled" name="scheduled_time" class="form-control" value="{{ sched }}"></div>
+        </div>
+        <div class="mt-3"><label class="form-label" for="c_attachments">Вложения <span class="text-body-secondary">(до 3 файлов, ≤ 10 МБ)</span></label><input type="file" id="c_attachments" name="attachments" class="form-control" multiple>
+          {% if c and c.id %}<div class="form-text">Новые файлы добавляются к уже прикреплённым.</div>{% endif %}</div>
+      </div>
+    </div>
+    <div class="d-flex gap-2 flex-wrap">
+      <button class="btn btn-outline-secondary" type="submit" name="intent" value="draft">Сохранить черновик</button>
+      <button class="btn btn-success" type="submit" name="intent" value="schedule">Запланировать отправку</button>
+      <button class="btn btn-primary" type="submit" name="intent" value="send_now"
+              onclick="return confirm('Отправить рассылку сейчас всем указанным получателям?')">
+        <i class="bx bx-send me-1"></i>Отправить сразу
+      </button>
+    </div>
+  </form>
+</div>
+{% endblock %}
+{% block extra_js_bottom %}
+<script>
+  (function () {
+    var sel = document.getElementById('tpl-select');
+    var preview = document.getElementById('tpl-preview');
+    if (!sel || !preview) return;
+
+    // Кнопка «Посмотреть шаблон» открывает выбранный шаблон в новой вкладке.
+    // Само оформление объединяется с текстом на сервере при отправке — поле
+    // письма остаётся только для вашего собственного текста.
+    function sync() {
+      var id = sel.value;
+      if (id) {
+        preview.href = '/templates/' + id;
+        preview.classList.remove('disabled');
+      } else {
+        preview.href = '#';
+        preview.classList.add('disabled');
+      }
+    }
+    sel.addEventListener('change', sync);
+    sync();
+  })();
+</script>
+{% endblock %}

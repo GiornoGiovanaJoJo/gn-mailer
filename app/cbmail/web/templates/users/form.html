@@ -1,0 +1,53 @@
+{% extends "base_sneat.html" %}
+{% block title %}{{ 'Редактирование пользователя' if profile else 'Новый пользователь' }}{% endblock %}
+{% block content %}
+{% set p = profile %}
+<div class="col-12 col-lg-8">
+  <div class="d-flex justify-content-between align-items-center mb-4">
+    <h5 class="mb-0">{{ 'Редактирование пользователя' if p else 'Новый пользователь' }}</h5>
+    <a href="/users/" class="btn btn-outline-secondary btn-sm"><i class="bx bx-arrow-back me-1"></i>К списку</a>
+  </div>
+  <div class="card shadow-sm">
+    <div class="card-body">
+      <form method="post" action="{{ action }}">
+        {{ csrf_input(request)|safe }}
+        <div class="row g-3">
+          <div class="col-md-6">
+            <label class="form-label" for="u_username">Логин</label>
+            {% if p %}
+            <input type="text" id="u_username" class="form-control" value="{{ p.username }}" disabled>
+            <div class="form-text">Логин изменить нельзя.</div>
+            {% else %}
+            <input type="text" id="u_username" name="username" class="form-control" value="" autocomplete="off" required>
+            {% endif %}
+          </div>
+          <div class="col-md-6">
+            <label class="form-label" for="u_email">Email</label>
+            <input type="email" id="u_email" name="email" class="form-control" value="{{ p.email if p else '' }}" autocomplete="off">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label" for="u_first">Имя</label>
+            <input type="text" id="u_first" name="first_name" class="form-control" value="{{ p.first_name if p else '' }}" autocomplete="off">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label" for="u_last">Фамилия</label>
+            <input type="text" id="u_last" name="last_name" class="form-control" value="{{ p.last_name if p else '' }}" autocomplete="off">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label" for="u_pass">Пароль {% if p %}<span class="text-body-secondary">(пусто — не менять)</span>{% endif %}</label>
+            <input type="password" id="u_pass" name="password" class="form-control" autocomplete="new-password" {% if not p %}required{% endif %}>
+          </div>
+        </div>
+        <div class="d-flex gap-4 mt-3">
+          <div class="form-check"><input class="form-check-input" type="checkbox" id="u_staff" name="is_staff" value="1" {% if p and p.is_staff %}checked{% endif %}><label class="form-check-label" for="u_staff">Сотрудник</label></div>
+          <div class="form-check"><input class="form-check-input" type="checkbox" id="u_super" name="is_superuser" value="1" {% if p and p.is_superuser %}checked{% endif %}><label class="form-check-label" for="u_super">Администратор</label></div>
+        </div>
+        <div class="d-flex gap-2 mt-4">
+          <button class="btn btn-primary" type="submit">{{ 'Сохранить' if p else 'Создать' }}</button>
+          <a href="/users/" class="btn btn-outline-secondary">Отмена</a>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}

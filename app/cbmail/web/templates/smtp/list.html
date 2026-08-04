@@ -1,0 +1,184 @@
+{% extends "base_sneat.html" %}
+{% block title %}Настройки почты{% endblock %}
+{% block head %}
+<style>
+  .settings-header { background:linear-gradient(135deg,#7367f0 0%,#9e95f5 100%); color:#fff; padding:1.75rem; border-radius:.5rem .5rem 0 0; }
+  .settings-body { padding:1.75rem; }
+  .info-text { font-size:.8rem; color:var(--bs-secondary-color); margin-top:.25rem; }
+  .port-examples { display:flex; gap:.5rem; margin-top:.5rem; flex-wrap:wrap; }
+  .port-badge { background:var(--bs-tertiary-bg); color:#495057; padding:.25rem .75rem; border-radius:20px; font-size:.75rem; cursor:pointer; transition:all .2s; }
+  :root[data-bs-theme=dark] .port-badge { color:var(--bs-body-color); }
+  .port-badge:hover { background:#7367f0; color:#fff; }
+</style>
+{% endblock %}
+{% block content %}
+{% set e = edit %}
+<div class="col-12">
+  <nav aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="/campaigns/">Рассылки</a></li><li class="breadcrumb-item active" aria-current="page">Настройки почты</li></ol></nav>
+
+  <div class="card shadow-sm">
+    <div class="settings-header">
+      <h4 class="mb-2 text-white"><i class="icon-base bx bx-envelope me-2"></i>Настройки SMTP</h4>
+      <p class="mb-0 text-white-50">Несколько почтовых профилей в одном аккаунте — по одному на проект или домен. Нужный выбирается при создании кампании.</p>
+    </div>
+    <div class="settings-body">
+      <!-- Профили -->
+      <div class="mb-4">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <h5 class="mb-0">Мои почтовые профили</h5>
+          {% if e %}<a href="/smtp/" class="btn btn-sm btn-outline-primary"><i class="icon-base bx bx-plus me-1"></i>Добавить профиль</a>{% endif %}
+        </div>
+        {% if profiles %}
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead class="table-light"><tr><th>Название</th><th>SMTP-сервер</th><th>Отправитель</th><th>Проверка</th><th class="text-end">Действия</th></tr></thead>
+            <tbody>
+            {% for p in profiles %}
+              <tr {% if e and e.id == p.id %}class="table-primary"{% endif %}>
+                <td class="fw-medium">{{ p.title or '—' }}</td>
+                <td>{{ p.email_host or '—' }}{% if p.email_port %}:{{ p.email_port }}{% endif %}{% if p.email_use_ssl %} · SSL{% elif p.email_use_tls %} · TLS{% endif %}</td>
+                <td>{{ p.default_from_email or p.email_host_user or '—' }}</td>
+                <td>{% if p.last_check_time %}<span class="badge bg-label-{{ 'success' if p.last_check_success else 'danger' }}">{{ 'OK' if p.last_check_success else 'ошибка' }}</span>{% else %}<span class="text-body-secondary small">—</span>{% endif %}</td>
+                <td class="text-end" style="white-space:nowrap">
+                  <a href="/smtp/{{ p.id }}/edit" class="btn btn-sm btn-outline-secondary" title="Редактировать" aria-label="Редактировать профиль"><i class="icon-base bx bx-edit"></i></a>
+                  <form method="post" action="/smtp/{{ p.id }}/test" class="d-inline">{{ csrf_input(request)|safe }}<button class="btn btn-sm btn-outline-info" title="Проверить" aria-label="Проверить подключение"><i class="icon-base bx bx-plug"></i></button></form>
+                  <form method="post" action="/smtp/{{ p.id }}/delete" class="d-inline" onsubmit="return confirm('Удалить профиль «{{ p.title or p.email_host }}»?');">{{ csrf_input(request)|safe }}<button class="btn btn-sm btn-outline-danger" title="Удалить" aria-label="Удалить профиль"><i class="icon-base bx bx-trash"></i></button></form>
+                </td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <div class="alert alert-info mb-0">У вас пока нет почтовых профилей. Заполните форму ниже, чтобы добавить первый.</div>
+        {% endif %}
+      </div>
+
+      <h5 class="mb-3">{{ 'Редактирование профиля' if e else 'Новый профиль' }}</h5>
+      <form method="post" action="{{ ('/smtp/' ~ e.id ~ '/edit') if e else '/smtp/' }}" id="settings-form">
+        {{ csrf_input(request)|safe }}
+
+        {% if not e %}
+        <div class="alert alert-info d-flex" style="font-size:.875rem">
+          <i class="bx bx-info-circle me-2" style="font-size:1.2rem"></i>
+          <div>Это данные вашего почтового ящика, с которого будут уходить письма. Их выдаёт почтовый провайдер. Для <strong>Яндекса, Gmail, Mail.ru</strong> в поле «Пароль» нужен <strong>пароль приложения</strong> (создаётся в настройках почты), а не обычный пароль от ящика. Подсказка по серверам и портам — в таблице внизу.</div>
+        </div>
+        {% endif %}
+
+        <h6 class="text-body-secondary text-uppercase small mb-3">Основные настройки</h6>
+        <div class="mb-3">
+          <label class="form-label" for="smtp_title"><i class="icon-base bx bx-purchase-tag me-1"></i>Название профиля</label>
+          <input type="text" id="smtp_title" name="title" class="form-control" value="{{ e.title if e else '' }}" placeholder="Например: Проект A / info@a.ru" autocomplete="off">
+          <div class="info-text">Метка, чтобы отличать профили разных проектов и доменов.</div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label" for="smtp_host"><i class="icon-base bx bx-server me-1"></i>SMTP-сервер</label>
+          <input type="text" id="smtp_host" name="email_host" class="form-control" value="{{ e.email_host if e else '' }}" placeholder="smtp.yandex.ru" autocomplete="off">
+          <div class="info-text">Адрес SMTP-сервера (например: smtp.gmail.com, smtp.yandex.ru).</div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label" for="smtp_port"><i class="icon-base bx bx-plug me-1"></i>Порт</label>
+          <input type="text" id="smtp_port" name="email_port" class="form-control" value="{{ e.email_port if e else '587' }}" inputmode="numeric" autocomplete="off">
+          <div class="info-text">Обычные порты:</div>
+          <div class="port-examples">
+            <span class="port-badge" onclick="setPort('587')">587 (TLS)</span>
+            <span class="port-badge" onclick="setPort('465')">465 (SSL)</span>
+            <span class="port-badge" onclick="setPort('25')">25</span>
+          </div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label" for="smtp_from"><i class="icon-base bx bx-envelope me-1"></i>Email отправителя</label>
+          <input type="text" id="smtp_from" name="default_from_email" class="form-control" value="{{ e.default_from_email if e else '' }}" placeholder="user@domain.ru" autocomplete="off">
+          <div class="info-text">Email, который будет указан как отправитель.</div>
+        </div>
+
+        <h6 class="text-body-secondary text-uppercase small mb-3 mt-4">Аутентификация</h6>
+        <div class="mb-3">
+          <label class="form-label" for="smtp_user"><i class="icon-base bx bx-user me-1"></i>Имя пользователя</label>
+          <input type="text" id="smtp_user" name="email_host_user" class="form-control" value="{{ e.email_host_user if e else '' }}" placeholder="user@domain.ru" autocomplete="off">
+        </div>
+        <div class="mb-3">
+          <label class="form-label" for="smtp_pass"><i class="icon-base bx bx-lock me-1"></i>Пароль {% if e %}<span class="text-body-secondary">(пусто — не менять)</span>{% endif %}</label>
+          <input type="password" id="smtp_pass" name="email_host_password" class="form-control" autocomplete="new-password" placeholder="••••••••">
+          <div class="info-text">Для Gmail/Яндекса используйте пароль приложения, а не обычный пароль.</div>
+        </div>
+
+        <h6 class="text-body-secondary text-uppercase small mb-3 mt-4">Шифрование</h6>
+        <div class="row">
+          <div class="col-md-6"><div class="form-check mb-3"><input class="form-check-input" type="checkbox" id="tls" name="email_use_tls" value="1" {% if e and e.email_use_tls %}checked{% endif %}><label class="form-check-label" for="tls">Использовать TLS</label><div class="info-text">Обычно для порта 587.</div></div></div>
+          <div class="col-md-6"><div class="form-check mb-3"><input class="form-check-input" type="checkbox" id="ssl" name="email_use_ssl" value="1" {% if e and e.email_use_ssl %}checked{% endif %}><label class="form-check-label" for="ssl">Использовать SSL</label><div class="info-text">Обычно для порта 465.</div></div></div>
+        </div>
+
+        <h6 class="text-body-secondary text-uppercase small mb-3 mt-4">Шапка и подвал сообщений</h6>
+        <div class="mb-3">
+          <label class="form-label" for="smtp_header"><i class="icon-base bx bx-header me-1"></i>Шапка сообщения</label>
+          <textarea id="smtp_header" name="message_header" class="form-control" rows="3" placeholder="С уважением,&#10;Команда компании">{{ e.message_header if e and e.message_header else '' }}</textarea>
+          <div class="info-text">Текст, который добавляется в начало каждого письма.</div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label" for="smtp_footer"><i class="icon-base bx bx-menu me-1"></i>Подвал сообщения</label>
+          <textarea id="smtp_footer" name="message_footer" class="form-control" rows="3" placeholder="--&#10;Отписаться: {{ '{{unsubscribe_url}}' }}">{{ e.message_footer if e and e.message_footer else '' }}</textarea>
+          <div class="info-text">Текст, который добавляется в конец каждого письма.</div>
+        </div>
+
+        <div class="d-flex justify-content-between mt-4 flex-wrap gap-2">
+          <button type="button" class="btn btn-success" onclick="testConnection()"><i class="icon-base bx bx-check-circle me-1"></i>Проверить подключение</button>
+          <div class="d-flex gap-2">
+            {% if e %}<a href="/smtp/" class="btn btn-outline-secondary"><i class="icon-base bx bx-arrow-back me-1"></i>Отмена</a>{% endif %}
+            <button type="submit" class="btn btn-primary"><i class="icon-base bx bx-save me-1"></i>{{ 'Сохранить профиль' if e else 'Добавить профиль' }}</button>
+          </div>
+        </div>
+      </form>
+
+      <div class="mt-5 pt-4 border-top">
+        <h6 class="mb-3">Популярные SMTP-серверы</h6>
+        <div class="table-responsive">
+          <table class="table table-sm table-bordered">
+            <thead class="table-light"><tr><th>Провайдер</th><th>SMTP-сервер</th><th>Порт TLS</th><th>Порт SSL</th><th>Примечания</th></tr></thead>
+            <tbody>
+              <tr><td>Gmail</td><td>smtp.gmail.com</td><td>587</td><td>465</td><td>Требуется пароль приложения</td></tr>
+              <tr><td>Yandex</td><td>smtp.yandex.ru</td><td>587</td><td>465</td><td>Требуется пароль приложения</td></tr>
+              <tr><td>Mail.ru</td><td>smtp.mail.ru</td><td>587</td><td>465</td><td>Требуется пароль приложения</td></tr>
+              <tr><td>Outlook</td><td>smtp-mail.outlook.com</td><td>587</td><td>—</td><td>TLS обязателен</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="testModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog"><div class="modal-content">
+    <div class="modal-header"><h5 class="modal-title">Проверка подключения</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Закрыть"></button></div>
+    <div class="modal-body" id="testModalBody">
+      <div class="text-center"><div class="spinner-border text-primary mb-3" role="status"><span class="visually-hidden">Загрузка…</span></div><p>Проверяем подключение к SMTP-серверу…</p></div>
+    </div>
+  </div></div>
+</div>
+{% endblock %}
+{% block extra_js_bottom %}
+<script>
+  function setPort(port) { document.getElementById('smtp_port').value = port; }
+  function testConnection() {
+    var modal = new bootstrap.Modal(document.getElementById('testModal'));
+    modal.show();
+    var body = document.getElementById('testModalBody');
+    body.innerHTML = '<div class="text-center"><div class="spinner-border text-primary mb-3" role="status"></div><p>Проверяем подключение к SMTP-серверу…</p></div>';
+    var data = new FormData(document.getElementById('settings-form'));
+    fetch('/smtp/test-connection', { method: 'POST', body: data, headers: { 'X-CSRFToken': '{{ csrf_token(request) }}' } })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.status === 'success') {
+          body.innerHTML = '<div class="text-center"><i class="icon-base bx bx-check-circle text-success" style="font-size:48px"></i><h5 class="mt-3 text-success">Подключение успешно</h5><p class="text-body-secondary">SMTP-сервер отвечает корректно.</p></div>';
+        } else {
+          body.innerHTML = '<div class="text-center"><i class="icon-base bx bx-error-circle text-danger" style="font-size:48px"></i><h5 class="mt-3 text-danger">Ошибка подключения</h5><p class="text-body-secondary"></p></div>';
+          body.querySelector('p').textContent = d.message || 'Не удалось подключиться';
+        }
+      })
+      .catch(function () {
+        body.innerHTML = '<div class="text-center"><i class="icon-base bx bx-error-circle text-danger" style="font-size:48px"></i><h5 class="mt-3 text-danger">Ошибка</h5><p class="text-body-secondary">Не удалось выполнить проверку.</p></div>';
+      });
+  }
+</script>
+{% endblock %}

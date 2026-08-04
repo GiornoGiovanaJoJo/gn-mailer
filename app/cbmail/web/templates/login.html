@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ru" class="light-style" dir="ltr" data-bs-theme="light" data-assets-path="/static/moderation/">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Вход | GN Mailer</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='2' y='4' width='20' height='16' rx='3' fill='%237c3aed'/%3E%3Cpath d='M4 6l8 6 8-6' stroke='%23fff' stroke-width='1.8' fill='none'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/moderation/fonts/iconify-icons.css" />
+  <link rel="stylesheet" href="/static/moderation/css/core.css" />
+  <link rel="stylesheet" href="/static/moderation/demo.css" />
+  <script src="/static/moderation/js/helpers.js"></script>
+  <script src="/static/moderation/config.js"></script>
+  <style>
+    /* Контраст под WCAG AA (см. base_sneat). */
+    .btn-primary { background-color:#5a51e6; border-color:#5a51e6; }
+    .btn-primary:hover,.btn-primary:focus { background-color:#4f47cc; border-color:#4f47cc; }
+    :root[data-bs-theme=light] .text-body-secondary { color:#6c6874 !important; }
+  </style>
+</head>
+<body>
+<div class="authentication-wrapper authentication-basic container-p-y" style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1.5rem">
+  <main class="authentication-inner" style="width:100%;max-width:400px">
+    <div class="card px-sm-6 px-0">
+      <div class="card-body">
+        <div class="app-brand justify-content-center mb-4">
+          <span class="app-brand-logo demo">
+            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="2" y="4" width="20" height="16" rx="3" fill="#7c3aed"/>
+              <path d="M4 6l8 6 8-6" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+            </svg>
+          </span>
+          <span class="app-brand-text demo text-heading fw-bold ms-2">GN Mailer</span>
+        </div>
+        <h1 class="mb-1 h4">Вход в кабинет</h1>
+        <p class="mb-5">Система массовых рассылок</p>
+        {% if request.state.flash and request.state.flash.ok %}<div class="alert alert-success">{{ request.state.flash.ok }}</div>{% endif %}
+        {% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
+        <form method="post" action="/login" class="mb-5">
+          {{ csrf_input(request)|safe }}
+          <input type="hidden" name="next" value="{{ next or '' }}">
+          <div class="mb-5"><label class="form-label" for="username">Логин</label>
+            <input type="text" class="form-control" id="username" name="username" value="{{ username or '' }}" autofocus autocomplete="username"></div>
+          <div class="mb-5"><label class="form-label" for="password">Пароль</label>
+            <input type="password" class="form-control" id="password" name="password" autocomplete="current-password"></div>
+          <div class="mb-5"><button class="btn btn-primary d-grid w-100" type="submit">Войти</button></div>
+        </form>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="/static/moderation/libs/jquery/jquery.js"></script>
+<script src="/static/moderation/libs/popper/popper.js"></script>
+<script src="/static/moderation/js/bootstrap.js"></script>
+</body>
+</html>

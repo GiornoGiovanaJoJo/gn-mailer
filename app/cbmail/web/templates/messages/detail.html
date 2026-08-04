@@ -1,0 +1,41 @@
+{% extends "base_sneat.html" %}
+{% block title %}{{ message.subject or 'Письмо' }}{% endblock %}
+{% block content %}
+{% set m = message %}
+<div class="col-12">
+  <div class="card shadow-sm">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <div>
+        <h5 class="mb-0">{{ m.subject or '(без темы)' }}</h5>
+        <small class="text-body-secondary">{% if m.custom_id %}№ {{ m.custom_id }} · {% endif %}{{ 'Исходящее' if m.message_type == 'outgoing' else 'Входящее' }}</small>
+      </div>
+      <a href="/messages/" class="btn btn-outline-secondary btn-sm"><i class="bx bx-arrow-back me-1"></i>К списку</a>
+    </div>
+    <div class="card-body">
+      <div class="d-flex gap-2 mb-4">
+        <form method="post" action="/messages/{{ m.id }}/star" class="d-inline">{{ csrf_input(request)|safe }}<button class="btn btn-sm {{ 'btn-warning' if is_starred else 'btn-outline-warning' }}"><i class="bx {{ 'bxs-star' if is_starred else 'bx-star' }} me-1"></i>{{ 'В избранном' if is_starred else 'В избранное' }}</button></form>
+        <form method="post" action="/messages/{{ m.id }}/read" class="d-inline">{{ csrf_input(request)|safe }}<button class="btn btn-sm btn-outline-secondary"><i class="bx {{ 'bx-envelope-open' if is_read else 'bx-envelope' }} me-1"></i>{{ 'Непрочитанным' if is_read else 'Прочитанным' }}</button></form>
+        {% if m.is_deleted %}
+        <form method="post" action="/messages/{{ m.id }}/restore" class="d-inline">{{ csrf_input(request)|safe }}<button class="btn btn-sm btn-outline-success"><i class="bx bx-undo me-1"></i>Восстановить</button></form>
+        {% else %}
+        <form method="post" action="/messages/{{ m.id }}/trash" class="d-inline" onsubmit="return confirm('Переместить письмо в корзину?')">{{ csrf_input(request)|safe }}<button class="btn btn-sm btn-outline-danger"><i class="bx bx-trash me-1"></i>В корзину</button></form>
+        {% endif %}
+      </div>
+      <table class="table table-sm mb-4">
+        <tr><th style="width:160px">Получатели</th><td>{{ m.clients or '—' }}</td></tr>
+        <tr><th>Создано</th><td>{{ m.created_at.strftime('%d.%m.%Y %H:%M') if m.created_at else '—' }}</td></tr>
+        {% if m.files %}<tr><th>Вложения</th><td>{% for f in m.files %}<span class="badge bg-label-secondary me-1">{{ f.filename }}</span>{% endfor %}</td></tr>{% endif %}
+      </table>
+      {% if m.message %}
+        {% if is_html %}
+        <iframe srcdoc="{{ m.message|e }}" style="width:100%;height:520px;border:1px solid #d9dee3;border-radius:6px" title="Тело письма"></iframe>
+        {% else %}
+        <div class="border rounded p-3" style="white-space:pre-wrap">{{ m.message }}</div>
+        {% endif %}
+      {% else %}
+        <p class="text-body-secondary mb-0">Письмо без содержимого.</p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,24 @@
+{% extends "base_sneat.html" %}
+{% block title %}Мой профиль{% endblock %}
+{% block content %}
+<div class="col-12 col-lg-7">
+  <h5 class="mb-4">Мой профиль</h5>
+  <div class="card shadow-sm">
+    <div class="card-body">
+      <div class="d-flex align-items-center mb-4">
+        <div class="avatar avatar-lg me-3"><span class="avatar-initial rounded-circle bg-label-primary" style="font-size:1.4rem">{{ user.username[0]|upper }}</span></div>
+        <div><h6 class="mb-0">{{ user.display_name }}</h6><small class="text-body-secondary">@{{ user.username }} · {{ 'Администратор' if user.is_superuser else ('Сотрудник' if user.is_staff else 'Пользователь') }}</small></div>
+      </div>
+      <form method="post" action="/account/profile">
+        {{ csrf_input(request)|safe }}
+        <div class="row g-3">
+          <div class="col-md-6"><label class="form-label" for="p_first">Имя</label><input type="text" id="p_first" name="first_name" class="form-control" value="{{ user.first_name }}" autocomplete="given-name"></div>
+          <div class="col-md-6"><label class="form-label" for="p_last">Фамилия</label><input type="text" id="p_last" name="last_name" class="form-control" value="{{ user.last_name }}" autocomplete="family-name"></div>
+          <div class="col-12"><label class="form-label" for="p_email">Email</label><input type="email" id="p_email" name="email" class="form-control" value="{{ user.email }}" autocomplete="email"></div>
+        </div>
+        <div class="mt-4"><button class="btn btn-primary" type="submit">Сохранить</button></div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,57 @@
+{% extends "base_sneat.html" %}
+{% block title %}Рассылки{% endblock %}
+{% block content %}
+<div class="col-12">
+  <div class="card shadow-sm">
+    <div class="card-header d-flex justify-content-between align-items-center py-3">
+      <div>
+        <h5 class="mb-0"><i class="bx bx-mail-send me-2 text-primary"></i>Рассылки</h5>
+        <small class="text-body-secondary">Массовые email-кампании</small>
+      </div>
+      <a href="/campaigns/new" class="btn btn-primary"><i class="bx bx-plus me-1"></i>Новая рассылка</a>
+    </div>
+    <div class="card-body">
+    {% if page.items %}
+      <div class="table-responsive">
+        <table class="table table-hover align-middle">
+          <thead class="table-light">
+            <tr><th>Название</th><th>Статус</th><th>Прогресс</th><th>Получатели</th><th>Создана</th><th class="text-end">Действия</th></tr>
+          </thead>
+          <tbody>
+          {% for c in page.items %}
+            <tr>
+              <td><a href="/campaigns/{{ c.id }}" class="fw-medium text-body">{{ c.name }}</a><div class="text-body-secondary small">{{ c.subject }}</div></td>
+              <td><span class="badge bg-label-{{ c.status|status_badge }}">{{ c.status|status_label }}</span></td>
+              <td style="min-width:150px">
+                <div class="progress" style="height:6px"><div class="progress-bar" style="width:{{ c.progress_percent }}%"></div></div>
+                <small class="text-body-secondary">{{ c.sent_count }}/{{ c.total_recipients }} · ошибок {{ c.failed_count }}</small>
+              </td>
+              <td>{{ c.total_recipients }}</td>
+              <td class="text-body-secondary">{{ c.created_at.strftime('%d.%m.%Y %H:%M') if c.created_at else '' }}</td>
+              <td class="text-end">
+                <div class="btn-group" role="group">
+                  <a href="/campaigns/{{ c.id }}" class="btn btn-sm btn-outline-info" title="Открыть" aria-label="Открыть кампанию"><i class="bx bx-show"></i></a>
+                  {% if c.status in ['sending','scheduled'] %}
+                  <form method="post" action="/campaigns/{{ c.id }}/stop" class="d-inline" onsubmit="return confirm('Остановить рассылку? Кампания сохранится.')">{{ csrf_input(request)|safe }}<button class="btn btn-sm btn-outline-warning" title="Остановить" aria-label="Остановить рассылку"><i class="bx bx-stop-circle"></i></button></form>
+                  {% endif %}
+                  <form method="post" action="/campaigns/{{ c.id }}/delete" class="d-inline" onsubmit="return confirm('Удалить кампанию безвозвратно?')">{{ csrf_input(request)|safe }}<button class="btn btn-sm btn-outline-danger" title="Удалить" aria-label="Удалить кампанию"><i class="bx bx-trash"></i></button></form>
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% include '_pagination.html' %}
+    {% else %}
+      <div class="text-center py-5">
+        <i class="bx bx-mail-send" style="font-size:56px;color:#c7c3e0"></i>
+        <h6 class="mt-3">Пока нет ни одной кампании</h6>
+        <p class="text-body-secondary">Создайте первую рассылку.</p>
+        <a href="/campaigns/new" class="btn btn-primary"><i class="bx bx-plus me-1"></i>Новая рассылка</a>
+      </div>
+    {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

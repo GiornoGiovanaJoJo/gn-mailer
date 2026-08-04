@@ -1,0 +1,66 @@
+# FastAPI-версия (cbmail). Подключается к УЖЕ работающим cb-mail-db и
+# cb-mail-redis из основного стека по внутренней сети — та же БД и те же данные,
+# что у Django-версии. Схема совместима, добавляется лишь таблица cbmail_session.
+#
+# Безопасный порядок выкатки:
+#   1) поднять только cbmail-web на порту 8010 рядом с работающим Django (8002),
+#      проверить вход/интерфейс на живых данных — воркер НЕ трогаем, двойной
+#      рассылки быть не может;
+#   2) когда всё подтверждено — остановить Django-стек и переключить порт.
+#
+# Сеть внешняя: имя по умолчанию складывается как <каталог>_default. Если проект
+# лежит в /opt/emails-code, сеть — emails-code_default.
+
+networks:
+  default:
+    external: true
+    name: emails-code_default
+
+services:
+  cbmail-web:
+    build:
+      context: .
+      dockerfile: _config/cbmail/Dockerfile
+    image: cbmail:latest
+    container_name: cbmail-web
+    command: bash entrypoint-web.sh
+    env_file:
+      - .env
+    environment:
+      LICENSE_FILE: /app/license.key
+      PUBLIC_BASE_URL: ${CBMAIL_PUBLIC_URL:-http://81.177.139.113:8010}
+      WEB_WORKERS: "2"
+    volumes:
+      - ./src/_media:/app/_media
+      - ./src/_static:/app/_static
+      - ./app/license.key:/app/license.key
+      - /etc/machine-id:/etc/host-machine-id:ro
+    ports:
+      - "${CBMAIL_PORT:-8010}:8000"
+    restart: unless-stopped
+
+  cbmail-worker:
+    build:
+      context: .
+      dockerfile: _config/cbmail/Dockerfile
+    image: cbmail:latest
+    container_name: cbmail-worker
+    command: bash entrypoint-worker.sh
+    env_file:
+      - .env
+    environment:
+      LICENSE_FILE: /app/license.key
+      CELERY_BROKER_URL: redis://cb-mail-redis:6379/0
+      CELERY_RESULT_BACKEND: redis://cb-mail-redis:6379/0
+      PUBLIC_BASE_URL: ${CBMAIL_PUBLIC_URL:-http://81.177.139.113:8010}
+    volumes:
+      - ./src/_media:/app/_media
+      - ./src/_static:/app/_static
+      - ./app/license.key:/app/license.key
+      - /etc/machine-id:/etc/host-machine-id:ro
+    restart: unless-stopped
+    profiles:
+      # Воркер поднимается только явно (--profile worker): на этапе smoke-теста
+      # рядом с работающим Django его запускать нельзя — оба beat'а рассылали бы
+      # одни и те же кампании дважды.
+      - worker

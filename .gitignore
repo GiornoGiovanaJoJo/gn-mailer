@@ -1,0 +1,27 @@
+# Секреты и локальные данные — НИКОГДА не коммитим
+.env
+*.env
+license.key
+license_private_key*.pem
+*.SECRET.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Локальная БД dev-сервера
+*.sqlite3
+
+# Редакторы/ОС
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

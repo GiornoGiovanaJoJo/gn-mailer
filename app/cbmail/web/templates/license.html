@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Активация лицензии — GN Mailer</title>
+  <style>
+    body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif; background:#f4f5fa; color:#2f2b3d; }
+    .box { max-width:640px; margin:8vh auto; background:#fff; padding:32px; border-radius:14px; box-shadow:0 6px 24px rgba(0,0,0,.08); }
+    h1 { font-size:1.6rem; margin:0 0 4px; }
+    p.sub { color:#666; margin:0 0 8px; }
+    textarea { width:100%; box-sizing:border-box; font-family:monospace; font-size:13px; padding:12px; border:1px solid #ddd; border-radius:8px; }
+    button { margin-top:14px; padding:11px 26px; background:#7367f0; color:#fff; border:none; border-radius:8px; font-size:15px; cursor:pointer; }
+    .note { margin:12px 0; padding:10px; border-radius:8px; }
+    .active { background:#e8f5e9; color:#1b5e20; } .warn { background:#fff3e0; color:#e65100; } .err { background:#fdecea; color:#b71c1c; }
+    code { background:#f4f5fa; padding:2px 6px; border-radius:5px; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>Активация лицензии</h1>
+    <p class="sub">Вставьте лицензионный ключ, полученный от разработчика, и нажмите «Активировать».</p>
+    {% if status.ok %}
+      <div class="note active">Лицензия активна. Сервис работает.</div>
+    {% else %}
+      <div class="note warn">Текущий статус: {{ status.reason }}</div>
+    {% endif %}
+    {% if error %}<div class="note err">Ключ не принят: {{ error }}</div>{% endif %}
+    <form method="post" action="/license/">
+      <textarea name="license_key" rows="8" placeholder="Вставьте сюда содержимое ключа"></textarea>
+      <button type="submit">Активировать</button>
+    </form>
+    <p style="color:#aaa;font-size:12px;margin-top:20px">ID сервера (сообщите разработчику для выпуска ключа): <code>{{ status.host_id }}</code></p>
+  </div>
+</body>
+</html>

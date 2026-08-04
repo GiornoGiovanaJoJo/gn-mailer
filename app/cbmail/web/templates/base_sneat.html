@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="ru"
+      class="layout-navbar-fixed layout-menu-fixed layout-compact"
+      dir="ltr" data-skin="default" data-assets-path="/static/moderation/"
+      data-template="vertical-menu-template" data-bs-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <script>
+    (function () {
+      var theme = localStorage.getItem('templateCustomizer-vertical-menu-template--Theme');
+      if (theme === 'dark' || theme === 'light') {
+        document.documentElement.setAttribute('data-bs-theme', theme);
+      } else if (theme === 'system') {
+        document.documentElement.setAttribute('data-bs-theme',
+          window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      }
+    })();
+  </script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>{% block title %}{% endblock title %} | GN Mailer</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='2' y='4' width='20' height='16' rx='3' fill='%237c3aed'/%3E%3Cpath d='M4 6l8 6 8-6' stroke='%23fff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Public+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400;1,500;1,600;1,700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/moderation/fonts/iconify-icons.css" />
+  <link rel="stylesheet" href="/static/moderation/libs/pickr/pickr-themes.css" />
+  <link rel="stylesheet" href="/static/moderation/css/core.css" />
+  <link rel="stylesheet" href="/static/moderation/demo.css" />
+  <link rel="stylesheet" href="/static/moderation/libs/perfect-scrollbar/perfect-scrollbar.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" />
+  <script src="/static/moderation/js/helpers.js"></script>
+  <script src="/static/moderation/js/template-customizer.js"></script>
+  <script src="/static/moderation/config.js"></script>
+  <style id="a11y-contrast">
+    /* Контраст под WCAG AA. Фирменную палитру глобально не меняем: затемняем
+       только сплошную primary-кнопку (белый текст на фиолетовом) и — в СВЕТЛОЙ
+       теме — приглушённый серый текст и текст пастельных бейджей. Тёмная тема
+       не трогается: там контраст уже проходит. */
+    .btn-primary { background-color:#5a51e6; border-color:#5a51e6; }
+    .btn-primary:hover,.btn-primary:focus { background-color:#4f47cc; border-color:#4f47cc; }
+    /* Сплошные контекстные кнопки: белый текст требует затемнить светлые фоны до AA. */
+    .btn-success { background-color:#2e7d32; border-color:#2e7d32; color:#fff; }
+    .btn-success:hover,.btn-success:focus { background-color:#276a2b; border-color:#276a2b; color:#fff; }
+    .btn-warning { background-color:#a06000; border-color:#a06000; color:#fff; }
+    .btn-warning:hover,.btn-warning:focus { background-color:#875100; border-color:#875100; color:#fff; }
+    .btn-info { background-color:#0e7490; border-color:#0e7490; color:#fff; }
+    .btn-info:hover,.btn-info:focus { background-color:#0b5f77; border-color:#0b5f77; color:#fff; }
+    .btn-danger { background-color:#c62828; border-color:#c62828; color:#fff; }
+    .btn-danger:hover,.btn-danger:focus { background-color:#ad2222; border-color:#ad2222; color:#fff; }
+    /* Приглушённый серый по всему UI (покрывает и .text-body-secondary, и .info-text,
+       которые берут цвет из этой переменной). */
+    :root[data-bs-theme=light] { --bs-secondary-color:#6c6874; }
+    :root[data-bs-theme=light] .text-body-secondary { color:#6c6874 !important; }
+    :root[data-bs-theme=light] .bg-label-success { color:#1f7d1c !important; }
+    :root[data-bs-theme=light] .bg-label-danger  { color:#b3261e !important; }
+    :root[data-bs-theme=light] .bg-label-warning { color:#8f5400 !important; }
+    :root[data-bs-theme=light] .bg-label-info    { color:#0a6c86 !important; }
+    :root[data-bs-theme=light] .bg-label-secondary { color:#585463 !important; }
+    :root[data-bs-theme=light] .bg-label-primary { color:#4b43c4 !important; }
+    /* Активный пункт меню: фирменный #696cff на светло-фиолетовом фоне не проходит —
+       затемняем текст активного пункта. */
+    :root[data-bs-theme=light] .menu-item.active > .menu-link,
+    :root[data-bs-theme=light] .menu-item.active > .menu-link .menu-icon { color:#463cc0 !important; }
+    /* Soft-кнопки (btn-label-*): тёмный текст в покое, белый на hover (там фон заливается). */
+    :root[data-bs-theme=light] .btn-label-primary { color:#463cc0; }
+    :root[data-bs-theme=light] .btn-label-primary:hover,
+    :root[data-bs-theme=light] .btn-label-primary:focus,
+    :root[data-bs-theme=light] .btn-label-primary:active { color:#fff; }
+    /* Активная вкладка-пилюля: белый на фирменном фоне — затемняем фон. */
+    :root[data-bs-theme=light] .nav-pills .nav-link.active { background-color:#5a51e6; }
+    /* Outline-кнопки с текстом: фирменный цвет текста на белом не проходит — затемняем. */
+    :root[data-bs-theme=light] .btn-outline-primary { color:#5048d8; }
+    :root[data-bs-theme=light] .btn-outline-info { color:#0e7490; }
+    :root[data-bs-theme=light] .btn-outline-success { color:#2e7d32; }
+    :root[data-bs-theme=light] .btn-outline-warning { color:#8f5400; }
+    :root[data-bs-theme=light] .btn-outline-primary:hover,
+    :root[data-bs-theme=light] .btn-outline-info:hover,
+    :root[data-bs-theme=light] .btn-outline-success:hover,
+    :root[data-bs-theme=light] .btn-outline-warning:hover { color:#fff; }
+    :root[data-bs-theme=light] .btn-outline-secondary { color:#5a6577; }
+    :root[data-bs-theme=light] .btn-outline-secondary:hover { color:#fff; }
+    /* Инлайн-код (плейсхолдеры) и alert-info: дефолтные цвета темы не проходят. */
+    :root[data-bs-theme=light] code { color:#c92a6f; }
+    :root[data-bs-theme=light] .alert-info { color:#0a6c86; }
+    :root[data-bs-theme=light] .alert-success { color:#1f7d1c; }
+    :root[data-bs-theme=light] .alert-warning { color:#8a5300; }
+    :root[data-bs-theme=light] .alert-danger { color:#b3261e; }
+  </style>
+  {% block head %}{% endblock head %}
+</head>
+<body>
+<div class="layout-wrapper layout-content-navbar">
+  <div class="layout-container">
+    <aside id="layout-menu" class="layout-menu menu-vertical menu">
+      <div class="app-brand demo">
+        <a href="/campaigns/" class="app-brand-link">
+          <span class="app-brand-logo demo"><span class="text-primary">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="2" y="4" width="20" height="16" rx="3" fill="#7c3aed"/>
+              <path d="M4 6l8 6 8-6" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+              <path d="M4 18l5.5-5" stroke="#fff" stroke-width="1.5" stroke-linecap="round" fill="none" opacity="0.5"/>
+              <path d="M20 18l-5.5-5" stroke="#fff" stroke-width="1.5" stroke-linecap="round" fill="none" opacity="0.5"/>
+            </svg>
+          </span></span>
+          <span class="app-brand-text demo menu-text fw-bold ms-2">GN Mailer</span>
+        </a>
+      </div>
+      <div class="menu-inner-shadow"></div>
+      {% set path = request.url.path %}
+      <ul class="menu-inner py-1">
+        {% if user and user.is_superuser %}
+        <li class="menu-item {% if path.startswith('/users') %}active{% endif %}">
+          <a href="/users/" class="menu-link"><i class="menu-icon icon-base bx bx-group"></i><div>Пользователи</div></a>
+        </li>
+        {% endif %}
+        <li class="menu-item open">
+          <a href="javascript:void(0);" class="menu-link menu-toggle">
+            <i class="menu-icon icon-base bx bx-envelope"></i>
+            <div>Почта</div>
+          </a>
+          <ul class="menu-sub">
+            <li class="menu-item {% if path == '/messages/' or path.startswith('/messages/') %}active{% endif %}">
+              <a href="/messages/" class="menu-link"><div>Письма</div></a>
+            </li>
+            {% if user and user.is_superuser %}
+            <li class="menu-item {% if path.startswith('/all-messages') %}active{% endif %}">
+              <a href="/all-messages/" class="menu-link"><div>Все письма</div></a>
+            </li>
+            {% endif %}
+            <li class="menu-item {% if path.startswith('/campaigns') %}active{% endif %}">
+              <a href="/campaigns/" class="menu-link"><div>Рассылка</div></a>
+            </li>
+            <li class="menu-item {% if path.startswith('/templates') %}active{% endif %}">
+              <a href="/templates/" class="menu-link"><div>Шаблоны</div></a>
+            </li>
+            <li class="menu-item {% if path.startswith('/smtp') %}active{% endif %}">
+              <a href="/smtp/" class="menu-link"><div>Настройки</div></a>
+            </li>
+            <li class="menu-item {% if path.startswith('/stoplist') %}active{% endif %}">
+              <a href="/stoplist/" class="menu-link"><div>Стоп-лист</div></a>
+            </li>
+          </ul>
+        </li>
+      </ul>
+    </aside>
+    <div class="menu-mobile-toggler d-xl-none rounded-1">
+      <a href="javascript:void(0);" class="layout-menu-toggle menu-link text-large text-bg-secondary p-2 rounded-1">
+        <i class="bx bx-menu icon-base"></i><i class="bx bx-chevron-right icon-base"></i>
+      </a>
+    </div>
+    <div class="layout-page">
+      <nav class="layout-navbar container-xxl navbar-detached navbar navbar-expand-xl align-items-center bg-navbar-theme" id="layout-navbar">
+        <div class="layout-menu-toggle navbar-nav align-items-xl-center me-4 me-xl-0 d-xl-none">
+          <a class="nav-item nav-link px-0 me-xl-6" href="javascript:void(0)"><i class="icon-base bx bx-menu icon-md"></i></a>
+        </div>
+        <div class="navbar-nav-right d-flex align-items-center justify-content-end w-100" id="navbar-collapse">
+          <ul class="navbar-nav flex-row align-items-center ms-auto">
+            <li class="nav-item dropdown me-2 me-xl-0">
+              <a class="nav-link dropdown-toggle hide-arrow" id="nav-theme" href="javascript:void(0);" data-bs-toggle="dropdown" role="button" aria-label="Сменить тему оформления" title="Сменить тему">
+                <i class="icon-base bx bx-sun icon-md theme-icon-active"></i>
+                <span class="d-none ms-2" id="nav-theme-text">Тема</span>
+              </a>
+              <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="nav-theme-text">
+                <li><button type="button" class="dropdown-item active" data-bs-theme-value="light"><span><i class="icon-base bx bx-sun icon-md me-3" data-icon="sun"></i>Светлая</span></button></li>
+                <li><button type="button" class="dropdown-item" data-bs-theme-value="dark"><span><i class="icon-base bx bx-moon icon-md me-3" data-icon="moon"></i>Тёмная</span></button></li>
+                <li><button type="button" class="dropdown-item" data-bs-theme-value="system"><span><i class="icon-base bx bx-desktop icon-md me-3" data-icon="desktop"></i>Системная</span></button></li>
+              </ul>
+            </li>
+            <li class="nav-item navbar-dropdown dropdown-user dropdown">
+              <a class="nav-link dropdown-toggle hide-arrow p-0" href="javascript:void(0);" data-bs-toggle="dropdown" role="button" aria-label="Меню пользователя">
+                <div class="avatar avatar-online"><span class="avatar-initial rounded-circle bg-label-primary">{{ (user.username[0]|upper) if user else '?' }}</span></div>
+              </a>
+              <ul class="dropdown-menu dropdown-menu-end">
+                <li>
+                  <div class="dropdown-item">
+                    <div class="d-flex">
+                      <div class="flex-shrink-0 me-3"><div class="avatar avatar-online"><span class="avatar-initial rounded-circle bg-label-primary">{{ (user.username[0]|upper) if user else '?' }}</span></div></div>
+                      <div class="flex-grow-1"><h6 class="mb-0">{{ user.username if user else '' }}</h6><small class="text-body-secondary">{{ user.email if user else '' }}</small></div>
+                    </div>
+                  </div>
+                </li>
+                <li><div class="dropdown-divider my-1"></div></li>
+                <li><a class="dropdown-item" href="/account/profile"><i class="icon-base bx bx-user icon-md me-3"></i><span>Мой профиль</span></a></li>
+                <li><a class="dropdown-item" href="/account/security"><i class="icon-base bx bx-cog icon-md me-3"></i><span>Безопасность</span></a></li>
+                <li><div class="dropdown-divider my-1"></div></li>
+                <li>
+                  <form method="post" action="/logout" class="m-0">{{ csrf_input(request)|safe }}
+                    <button type="submit" class="dropdown-item"><i class="icon-base bx bx-power-off icon-md me-3"></i><span>Выйти</span></button>
+                  </form>
+                </li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+      </nav>
+      <main class="content-wrapper">
+        <div class="container-xxl flex-grow-1 container-p-y">
+          {% if request.state.flash and request.state.flash.ok %}<div class="alert alert-success alert-dismissible fade show" role="alert">{{ request.state.flash.ok }}<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>{% endif %}
+          {% if request.state.flash and request.state.flash.err %}<div class="alert alert-danger alert-dismissible fade show" role="alert">{{ request.state.flash.err }}<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>{% endif %}
+          {% if error %}<div class="alert alert-danger" role="alert">{{ error }}</div>{% endif %}
+          {% block content %}{% endblock content %}
+        </div>
+        <div class="content-backdrop fade"></div>
+      </main>
+    </div>
+  </div>
+  <div class="layout-overlay layout-menu-toggle"></div>
+  <div class="drag-target"></div>
+</div>
+
+<script src="/static/moderation/libs/jquery/jquery.js"></script>
+<script src="/static/moderation/libs/popper/popper.js"></script>
+<script src="/static/moderation/js/bootstrap.js"></script>
+<script src="/static/moderation/libs/pickr/pickr.js"></script>
+<script src="/static/moderation/libs/perfect-scrollbar/perfect-scrollbar.js"></script>
+<script src="/static/moderation/libs/hammer/hammer.js"></script>
+<script src="/static/moderation/js/menu.js"></script>
+<script>
+  (function () {
+    var key = 'templateCustomizer-vertical-menu-template--Theme';
+    function resolveTheme(val) {
+      if (val === 'system') return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      return (val === 'dark' || val === 'light') ? val : 'light';
+    }
+    localStorage.removeItem('templateCustomizer-vertical-menu-template--LayoutCollapsed');
+    if (window.Helpers) {
+      window.Helpers.getPreferredTheme = function () {
+        var v = localStorage.getItem(key);
+        if (v === 'dark' || v === 'light' || v === 'system') return v;
+        return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      };
+      window.Helpers.getStoredTheme = function () { return localStorage.getItem(key) || document.documentElement.getAttribute('data-bs-theme') || 'light'; };
+      window.Helpers.setStoredTheme = function (t, val) { localStorage.setItem(key, val); };
+    }
+    document.querySelectorAll('[data-bs-theme-value]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var val = btn.getAttribute('data-bs-theme-value');
+        localStorage.setItem(key, val);
+        document.documentElement.setAttribute('data-bs-theme', resolveTheme(val));
+        if (window.Helpers && window.Helpers.showActiveTheme) window.Helpers.showActiveTheme(val);
+      });
+    });
+    document.addEventListener('DOMContentLoaded', function () {
+      var stored = localStorage.getItem(key) || document.documentElement.getAttribute('data-bs-theme') || 'light';
+      if (window.Helpers && window.Helpers.showActiveTheme) { try { window.Helpers.showActiveTheme(stored); } catch (e) {} }
+    });
+  })();
+</script>
+<script src="/static/moderation/main.js"></script>
+{% block extra_js_bottom %}{% endblock extra_js_bottom %}
+</body>
+</html>

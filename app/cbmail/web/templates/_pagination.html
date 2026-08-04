@@ -1,0 +1,16 @@
+{# Общая постраничная навигация. Ожидает `page` (cbmail.web.pagination.Page) и
+   необязательный `qs` — префикс query-строки со своими параметрами и хвостовым
+   «&» (например, "box=trash&"). Так один компонент обслуживает все списки. #}
+{% set qs = qs if qs is defined else '' %}
+{% if page.pages > 1 %}
+<div class="d-flex justify-content-between align-items-center mt-3">
+  <div class="text-body-secondary small">Показано {{ page.start_index }}–{{ page.end_index }} из {{ page.total }}</div>
+  <nav aria-label="Постраничная навигация"><ul class="pagination pagination-sm mb-0">
+    <li class="page-item {{ 'disabled' if not page.has_prev }}"><a class="page-link" href="?{{ qs }}page={{ page.page - 1 }}" aria-label="Предыдущая страница">«</a></li>
+    {% for i in page.window() %}
+    <li class="page-item {{ 'active' if i == page.page }}"><a class="page-link" href="?{{ qs }}page={{ i }}"{{ ' aria-current="page"' if i == page.page }}>{{ i }}</a></li>
+    {% endfor %}
+    <li class="page-item {{ 'disabled' if not page.has_next }}"><a class="page-link" href="?{{ qs }}page={{ page.page + 1 }}" aria-label="Следующая страница">»</a></li>
+  </ul></nav>
+</div>
+{% endif %}

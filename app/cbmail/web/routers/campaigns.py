@@ -275,6 +275,17 @@ async def campaign_detail(
         .where(CampaignLog.campaign_id == campaign_id)
         .group_by(CampaignLog.status)
     )
+    all_recipients = parse_emails(campaign.recipient_emails)
+    # Предпросмотр «как в письме»: то же тело, что уйдёт адресату (с автоподписью
+    # отписки), с подстановкой примера адреса вместо плейсхолдеров.
+    profile = campaign.smtp
+    preview = composer.compose(
+        subject=campaign.subject,
+        body=campaign.message,
+        header=profile.message_header if profile else None,
+        footer=profile.message_footer if profile else None,
+        add_unsubscribe=True,
+    ).personalize("example@mail.ru", "#")
     return render(
         request,
         "campaigns/detail.html",
@@ -282,7 +293,10 @@ async def campaign_detail(
             "campaign": campaign,
             "logs": list(logs.scalars()),
             "log_counts": dict(counts.all()),
-            "recipients_preview": parse_emails(campaign.recipient_emails)[:50],
+            "recipients_preview": all_recipients[:200],
+            "recipients_total": len(all_recipients),
+            "preview_html": preview.html_body,
+            "preview_text": preview.text_body,
             "stoppable": campaign.status in _STOPPABLE,
         },
     )

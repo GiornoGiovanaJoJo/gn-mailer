@@ -68,10 +68,18 @@ def _seed() -> None:
             success_count=3, failure_count=0,
         ))
         s.add_all([
-            Campaign(name="Летняя акция", subject="Скидки до 50%", message="<p>Привет!</p>",
-                     recipient_emails="a@example.com, b@example.com", status="sent",
-                     total_recipients=1200, sent_count=1200, failed_count=3, user_id=uid,
-                     sent_at=now - timedelta(days=1)),
+            Campaign(name="Летняя акция", subject="Скидки до 50% на весь ассортимент",
+                     message=(
+                         '<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto">'
+                         '<h1 style="color:#6f5cff">Летняя распродажа началась!</h1>'
+                         '<p>Здравствуйте! Только до конца недели — скидки до 50% на весь каталог.</p>'
+                         '<p><a href="#" style="background:#6f5cff;color:#fff;padding:10px 20px;'
+                         'border-radius:6px;text-decoration:none">Перейти в магазин</a></p>'
+                         '<p style="color:#888">С уважением, команда магазина.</p></div>'
+                     ),
+                     recipient_emails="anna@example.com, ivan@example.com, petr@example.com, maria@example.com",
+                     status="sent", total_recipients=1200, sent_count=1197, failed_count=3,
+                     opened_count=418, user_id=uid, sent_at=now - timedelta(days=1)),
             Campaign(name="Анонс вебинара", subject="Приглашаем", message="<p>Ждём вас</p>",
                      recipient_emails="c@example.com", status="scheduled",
                      scheduled_time=now + timedelta(days=1), total_recipients=340, user_id=uid),

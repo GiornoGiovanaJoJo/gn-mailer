@@ -118,7 +118,7 @@
     <div class="card-header"><h6 class="mb-0"><i class="bx bx-file me-2 text-primary"></i>Текст письма</h6></div>
     <div class="card-body">
       {% if preview_html %}
-        <iframe class="mail-preview" title="Предпросмотр письма" sandbox srcdoc="{{ preview_html|e }}"></iframe>
+        <iframe class="mail-preview" title="Предпросмотр письма" sandbox="allow-same-origin" srcdoc="{{ preview_html|e }}"></iframe>
       {% elif preview_text %}
         <pre class="mb-0" style="white-space:pre-wrap;font-family:inherit">{{ preview_text }}</pre>
       {% else %}

@@ -71,9 +71,24 @@ LOG_SYSTEM = "system"
 ZOMBIE_BASE_MINUTES = 15
 ZOMBIE_HEADROOM_MINUTES = 10
 
+# Сколько раз за один заход переоткрывать оборвавшееся SMTP-соединение и
+# продолжать с оставшихся адресов. Нужно, потому что некоторые провайдеры
+# (в частности mail.ru) периодически рвут соединение на очередном письме —
+# без переподключения все адреса ПОСЛЕ оборвавшегося молча пропускались, а
+# кампания помечалась «Отправлена», и эти люди не получали письмо никогда.
+MAX_RECONNECTS_PER_BATCH = 5
+
+# Через сколько повторить кампанию, если за заход обработать всех не удалось
+# (соединение рвалось чаще, чем позволяет бюджет переподключений).
+RETRY_DELAY_MINUTES = 10
+
 
 class CampaignNotSendable(Exception):
     """Кампанию нельзя отправлять — с человекочитаемой причиной."""
+
+
+class _ConnectionLost(Exception):
+    """Внутренний сигнал: соединение оборвалось, нужно переоткрыть его."""
 
 
 @dataclass(slots=True)
@@ -87,6 +102,8 @@ class SendResult:
     already_complete: bool = False
     deferred: bool = False
     """Часть аудитории перенесена на следующие сутки из-за суточного лимита ящика."""
+    interrupted: bool = False
+    """Соединение рвалось чаще бюджета переподключений — остаток не обработан, нужен повтор."""
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -193,6 +210,25 @@ def send_campaign(
 
         if result.stopped_by_user:
             _finish(session, campaign, CampaignStatus.CANCELLED, now=now)
+        elif result.interrupted:
+            # Соединение рвалось чаще бюджета переподключений — часть адресов не
+            # обработана. НЕ помечаем «Отправлена» (иначе они не уйдут никогда).
+            if result.sent > 0:
+                # Прогресс есть — скорее всего временный сбой у провайдера,
+                # ставим на повтор; уже отправленные адреса при повторе отсеются.
+                _requeue_for_retry(
+                    session, campaign,
+                    "SMTP-соединение прерывалось — остаток будет дослан", now=now
+                )
+                result.deferred = True
+            else:
+                # Не ушло ни одного письма — вероятно, проблема с настройками
+                # почты. Возвращаем в черновик, чтобы не зациклиться на повторах.
+                _abort(
+                    session, campaign,
+                    "SMTP-соединение постоянно прерывается — проверьте настройки почты",
+                    now=now,
+                )
         elif capped_by_limit:
             # Ушла только часть из-за суточного лимита — не помечаем «Отправлена»,
             # а переносим остаток на следующие сутки: уже отправленные адреса
@@ -503,6 +539,36 @@ def _defer_to_next_day(
     session.commit()
 
 
+def _requeue_for_retry(
+    session: Session, campaign: Campaign | int, reason: str, *, now: Callable[[], datetime]
+) -> None:
+    """Поставить кампанию на скорый повтор (обрыв соединения не по вине адресов).
+
+    Статус «Запланирована», время — через ``RETRY_DELAY_MINUTES`` минут: планировщик
+    подхватит её и дошлёт необработанных получателей (уже отправленные отсеются).
+    """
+    campaign_id = campaign if isinstance(campaign, int) else campaign.id
+    next_run = now() + timedelta(minutes=RETRY_DELAY_MINUTES)
+    session.add(
+        CampaignLog(
+            campaign_id=campaign_id,
+            email=LOG_SYSTEM,
+            status="deferred",
+            error_message=(f"{reason}. Повтор в {next_run:%d.%m.%Y %H:%M} UTC.")[:2000],
+        )
+    )
+    session.execute(
+        update(Campaign)
+        .where(Campaign.id == campaign_id)
+        .values(
+            status=CampaignStatus.SCHEDULED.value,
+            scheduled_time=next_run,
+            updated_at=now(),
+        )
+    )
+    session.commit()
+
+
 def _compose(campaign: Campaign) -> composer.ComposedMessage:
     profile = campaign.smtp
     # Ссылка отписки добавляется автоматически, если пользователь не вставил её сам —
@@ -572,59 +638,89 @@ def _send_batch(
     now: Callable[[], datetime],
     scope_domain: str = "",
 ) -> bool:
-    """Отправить пачку в одном соединении. Возвращает True, если пользователь нажал «Стоп»."""
+    """Отправить пачку. Возвращает True, если пользователь нажал «Стоп».
+
+    При обрыве соединения (частый случай с mail.ru: «Connection unexpectedly
+    closed») соединение переоткрывается, и отправка ПРОДОЛЖАЕТСЯ со следующего
+    адреса — оборвавшийся помечается неудачным, но идущие за ним не теряются.
+    Раньше один такой адрес прекращал всю пачку, а кампания помечалась
+    «Отправлена», и получатели после него не получали письмо никогда.
+    """
     settings = get_settings()
     base_url = _base_url()
+    total = len(recipients)
+    index = 0
+    reconnects = 0
 
-    try:
-        with SmtpSession(credentials) as smtp:
-            for index, email in enumerate(recipients):
-                if _is_cancelled(session, campaign_id):
-                    return True
+    while index < total:
+        try:
+            with SmtpSession(credentials) as smtp:
+                while index < total:
+                    if _is_cancelled(session, campaign_id):
+                        return True
 
-                unsub_url = composer.build_unsubscribe_url(base_url, email, scope=scope_domain)
-                personalized = message.personalize(email, unsub_url)
-                outgoing = OutgoingMessage(
-                    subject=personalized.subject,
-                    text_body=personalized.text_body,
-                    html_body=personalized.html_body,
-                    from_email=from_email,
-                    attachments=attachments,
-                    headers={
-                        # Позволяет почтовым клиентам показать штатную кнопку
-                        # «Отписаться» — без неё пользователи жмут «Спам»,
-                        # что портит репутацию домена отправителя.
-                        "List-Unsubscribe": f"<{unsub_url}>",
-                    },
+                    email = recipients[index]
+                    unsub_url = composer.build_unsubscribe_url(base_url, email, scope=scope_domain)
+                    personalized = message.personalize(email, unsub_url)
+                    outgoing = OutgoingMessage(
+                        subject=personalized.subject,
+                        text_body=personalized.text_body,
+                        html_body=personalized.html_body,
+                        from_email=from_email,
+                        attachments=attachments,
+                        headers={
+                            # Позволяет почтовым клиентам показать штатную кнопку
+                            # «Отписаться» — без неё пользователи жмут «Спам»,
+                            # что портит репутацию домена отправителя.
+                            "List-Unsubscribe": f"<{unsub_url}>",
+                        },
+                    )
+
+                    fatal = False
+                    try:
+                        smtp.send(outgoing, email)
+                    except SmtpError as exc:
+                        _log_failure(session, campaign_id, email, exc, now=now)
+                        result.failed += 1
+                        result.errors.append(f"{email}: {exc}")
+                        fatal = not exc.permanent and _is_fatal(exc)
+                    else:
+                        _log_success(session, campaign_id, email, now=now)
+                        result.sent += 1
+
+                    # Адрес обработан (успех/неудача) — сдвигаемся, чтобы при
+                    # переоткрытии соединения не повторять именно его.
+                    index += 1
+
+                    if fatal:
+                        # Соединение мертво — выходим, чтобы переоткрыть его и
+                        # продолжить с оставшихся адресов.
+                        raise _ConnectionLost
+                    if interval > 0 and index < total:
+                        sleep(interval)
+                        # Пауза между письмами не должна выглядеть как зависание.
+                        _heartbeat(session, campaign_id, now=now)
+            # Внутренний цикл дошёл до конца без обрыва — пачка отправлена.
+            break
+        except (_ConnectionLost, SmtpError) as exc:
+            session.commit()
+            if index >= total:
+                break  # оборвалось на последнем адресе — переоткрывать нечего
+            reconnects += 1
+            if reconnects > MAX_RECONNECTS_PER_BATCH:
+                # Соединение рвётся слишком часто — остаток дошлём отдельным
+                # заходом, чтобы не превратить отправку в бесконечные попытки.
+                logger.warning(
+                    "Пачка кампании %s: соединение рвётся многократно — остаток на повтор",
+                    campaign_id,
                 )
-
-                try:
-                    smtp.send(outgoing, email)
-                except SmtpError as exc:
-                    _log_failure(session, campaign_id, email, exc, now=now)
-                    result.failed += 1
-                    result.errors.append(f"{email}: {exc}")
-                    if not exc.permanent and isinstance(exc, SmtpError) and _is_fatal(exc):
-                        # Соединение разорвано — остаток пачки уйдёт в следующем
-                        # заходе; продолжать в мёртвом сокете бессмысленно.
-                        raise
-                else:
-                    _log_success(session, campaign_id, email, now=now)
-                    result.sent += 1
-
-                if interval > 0 and index < len(recipients) - 1:
-                    sleep(interval)
-                    # Пауза между письмами не должна выглядеть как зависание.
-                    _heartbeat(session, campaign_id, now=now)
-
-    except SmtpError as exc:
-        # Ошибка уровня соединения: остальные адреса пачки не считаем
-        # неудачными — они просто не были обработаны и уйдут при следующем
-        # запуске. Раньше весь батч разом помечался как failed, и повторить
-        # отправку по ним было уже нельзя.
-        logger.warning("Пачка кампании %s прервана: %s", campaign_id, exc)
-        result.errors.append(str(exc))
-        session.commit()
+                result.errors.append(str(exc))
+                result.interrupted = True
+                return False
+            logger.warning(
+                "Пачка кампании %s: соединение прервано (%s) — переоткрываю (%d/%d)",
+                campaign_id, exc, reconnects, MAX_RECONNECTS_PER_BATCH,
+            )
 
     _ = settings
     return False

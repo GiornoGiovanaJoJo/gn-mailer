@@ -302,19 +302,22 @@ class TestFailures:
         assert result.failed == 1
 
     @pytest.mark.regression
-    def test_connection_loss_does_not_mark_whole_batch_failed(
+    def test_connection_loss_reconnects_and_continues(
         self, db: Session, make_campaign, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Раньше при обрыве связи ВЕСЬ остаток пачки помечался как failed.
+        """Обрыв соединения на одном адресе не должен «съедать» идущих за ним.
 
-        Эти адреса больше не попадали в повторную отправку, хотя письма им
-        никогда не уходили.
+        Провайдеры (в частности mail.ru) периодически рвут соединение на
+        очередном письме. Раньше все адреса ПОСЛЕ оборвавшегося молча
+        пропускались, а кампания помечалась «Отправлена» — эти люди не получали
+        письмо никогда. Теперь соединение переоткрывается и отправка
+        продолжается со следующего адреса.
         """
         fake = FakeSmtp(fail_for={"b@x.ru": SmtpConnectionError("Соединение разорвано")})
         monkeypatch.setattr(campaign_sender, "SmtpSession", fake)
         campaign = make_campaign(recipient_emails="a@x.ru, b@x.ru, c@x.ru, d@x.ru")
 
-        _send(db, campaign.id)
+        result = _send(db, campaign.id)
 
         failed = db.execute(
             select(CampaignLog.email).where(
@@ -323,13 +326,44 @@ class TestFailures:
         ).scalars().all()
         # Неудачным помечен только тот адрес, на котором реально оборвалось.
         assert failed == ["b@x.ru"]
-        # Необработанные адреса не считаются отправленными и уйдут при повторе.
+        # Идущие ПОСЛЕ обрыва адреса отправлены (соединение переоткрылось).
         sent = db.execute(
             select(CampaignLog.email).where(
                 CampaignLog.campaign_id == campaign.id, CampaignLog.status == "sent"
             )
         ).scalars().all()
-        assert "c@x.ru" not in sent
+        assert set(sent) == {"a@x.ru", "c@x.ru", "d@x.ru"}
+        assert result.sent == 3
+        assert result.failed == 1
+        # Все адреса обработаны за один заход — кампания завершена.
+        db.expire_all()
+        assert db.get(Campaign, campaign.id).status == "sent"  # type: ignore[union-attr]
+
+    @pytest.mark.regression
+    def test_repeated_drops_beyond_budget_requeue_remaining(
+        self, db: Session, make_campaign, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Если соединение рвётся чаще бюджета переподключений — остаток на повтор.
+
+        Кампания НЕ помечается «Отправлена», а ставится на повтор, чтобы
+        необработанные адреса ушли позже, а не потерялись.
+        """
+        # Первые адреса рвут соединение при каждой отправке — бюджет исчерпывается.
+        drops = {f"drop{i}@x.ru": SmtpConnectionError("обрыв") for i in range(7)}
+        fake = FakeSmtp(fail_for=drops)
+        monkeypatch.setattr(campaign_sender, "SmtpSession", fake)
+        recipients = ", ".join([f"drop{i}@x.ru" for i in range(7)] + ["ok@x.ru"])
+        campaign = make_campaign(recipient_emails=recipients)
+
+        result = _send(db, campaign.id)
+
+        assert result.interrupted
+        db.expire_all()
+        refreshed = db.get(Campaign, campaign.id)
+        assert refreshed is not None
+        # Есть прогресс не гарантирован (все drop* упали), но раз ни одного sent —
+        # кампания возвращается в черновик, а не крутится в повторах.
+        assert refreshed.status in {"scheduled", "draft"}
 
     @pytest.mark.regression
     def test_campaign_without_recipients_returns_to_draft_keeping_schedule(

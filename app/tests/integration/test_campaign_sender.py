@@ -340,30 +340,37 @@ class TestFailures:
         assert db.get(Campaign, campaign.id).status == "sent"  # type: ignore[union-attr]
 
     @pytest.mark.regression
-    def test_repeated_drops_beyond_budget_requeue_remaining(
+    def test_server_unreachable_aborts_without_looping(
         self, db: Session, make_campaign, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Если соединение рвётся чаще бюджета переподключений — остаток на повтор.
+        """Если SMTP-сервер вообще не открывается — кампания не зацикливается.
 
-        Кампания НЕ помечается «Отправлена», а ставится на повтор, чтобы
-        необработанные адреса ушли позже, а не потерялись.
+        Ни одного письма не ушло → возврат в «Черновик» с понятной причиной,
+        а не бесконечные повторы.
         """
-        # Первые адреса рвут соединение при каждой отправке — бюджет исчерпывается.
-        drops = {f"drop{i}@x.ru": SmtpConnectionError("обрыв") for i in range(7)}
-        fake = FakeSmtp(fail_for=drops)
-        monkeypatch.setattr(campaign_sender, "SmtpSession", fake)
-        recipients = ", ".join([f"drop{i}@x.ru" for i in range(7)] + ["ok@x.ru"])
-        campaign = make_campaign(recipient_emails=recipients)
+
+        class DeadSmtp:
+            def __call__(self, creds: object) -> DeadSmtp:
+                return self
+
+            def __enter__(self) -> DeadSmtp:
+                raise SmtpConnectionError("сервер недоступен")
+
+            def __exit__(self, *exc: object) -> None:
+                return None
+
+            def send(self, *a: object) -> None:
+                raise SmtpConnectionError("сервер недоступен")
+
+        monkeypatch.setattr(campaign_sender, "SmtpSession", DeadSmtp())
+        campaign = make_campaign(recipient_emails="a@x.ru, b@x.ru")
 
         result = _send(db, campaign.id)
 
         assert result.interrupted
+        assert result.sent == 0
         db.expire_all()
-        refreshed = db.get(Campaign, campaign.id)
-        assert refreshed is not None
-        # Есть прогресс не гарантирован (все drop* упали), но раз ни одного sent —
-        # кампания возвращается в черновик, а не крутится в повторах.
-        assert refreshed.status in {"scheduled", "draft"}
+        assert db.get(Campaign, campaign.id).status == "draft"  # type: ignore[union-attr]
 
     @pytest.mark.regression
     def test_campaign_without_recipients_returns_to_draft_keeping_schedule(
@@ -451,6 +458,27 @@ class TestIntervalPacing:
         # Пауза перед 2-м и 3-м письмом (перед первым — не нужна).
         assert slept == [600, 600]
         assert smtp.sent == ["a@x.ru", "b@x.ru", "c@x.ru"]
+
+    @pytest.mark.regression
+    def test_paced_send_opens_fresh_connection_each_time(
+        self, db: Session, make_campaign, smtp: FakeSmtp
+    ) -> None:
+        """При интервале соединение открывается заново перед каждым письмом.
+
+        Претензия «Connection unexpectedly closed» на 2-м и 3-м письме при
+        интервале 300 сек: почтовые серверы рвут простаивающую сессию, и
+        отправка по старому сокету после паузы падала. Теперь на паузу
+        соединение закрывается, а перед письмом открывается свежее.
+        """
+        campaign = make_campaign(
+            recipient_emails="a@x.ru, b@x.ru, c@x.ru", message_interval=600
+        )
+
+        campaign_sender.send_campaign(db, campaign.id, sleep=lambda _s: None, now=_now)
+
+        assert smtp.sent == ["a@x.ru", "b@x.ru", "c@x.ru"]
+        # Свежее соединение перед каждым письмом (а не одно на всю пачку).
+        assert smtp.connections == 3
 
     @pytest.mark.regression
     def test_interval_preserved_across_connection_drop(

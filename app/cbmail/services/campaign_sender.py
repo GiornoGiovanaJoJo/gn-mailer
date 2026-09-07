@@ -659,6 +659,18 @@ def _send_batch(
                     if _is_cancelled(session, campaign_id):
                         return True
 
+                    # Интервал соблюдается ПЕРЕД каждым письмом, кроме самого
+                    # первого за этот заход. Так пауза не теряется при обрыве и
+                    # переподключении (иначе после каждого сбоя письма уходили бы
+                    # подряд — «все сразу», хотя выставлен интервал) и работает
+                    # даже на границе батчей.
+                    if interval > 0 and (result.sent + result.failed) > 0:
+                        sleep(interval)
+                        # Пауза не должна выглядеть как зависание для сборщика «зомби».
+                        _heartbeat(session, campaign_id, now=now)
+                        if _is_cancelled(session, campaign_id):
+                            return True
+
                     email = recipients[index]
                     unsub_url = composer.build_unsubscribe_url(base_url, email, scope=scope_domain)
                     personalized = message.personalize(email, unsub_url)
@@ -696,10 +708,6 @@ def _send_batch(
                         # Соединение мертво — выходим, чтобы переоткрыть его и
                         # продолжить с оставшихся адресов.
                         raise _ConnectionLost
-                    if interval > 0 and index < total:
-                        sleep(interval)
-                        # Пауза между письмами не должна выглядеть как зависание.
-                        _heartbeat(session, campaign_id, now=now)
             # Внутренний цикл дошёл до конца без обрыва — пачка отправлена.
             break
         except (_ConnectionLost, SmtpError) as exc:

@@ -435,6 +435,53 @@ class TestCancellation:
         assert db.get(Campaign, campaign.id).status == "cancelled"  # type: ignore[union-attr]
 
 
+class TestIntervalPacing:
+    """Интервал между письмами соблюдается на всех путях (в т.ч. при обрывах)."""
+
+    def test_interval_applied_between_all_recipients(
+        self, db: Session, make_campaign, smtp: FakeSmtp
+    ) -> None:
+        slept: list[float] = []
+        campaign = make_campaign(
+            recipient_emails="a@x.ru, b@x.ru, c@x.ru", message_interval=600
+        )
+
+        campaign_sender.send_campaign(db, campaign.id, sleep=slept.append, now=_now)
+
+        # Пауза перед 2-м и 3-м письмом (перед первым — не нужна).
+        assert slept == [600, 600]
+        assert smtp.sent == ["a@x.ru", "b@x.ru", "c@x.ru"]
+
+    @pytest.mark.regression
+    def test_interval_preserved_across_connection_drop(
+        self, db: Session, make_campaign, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Пауза не должна теряться из-за обрыва соединения.
+
+        Претензия «письма пришли все сразу, хотя выставлен интервал 600 сек»:
+        раньше пауза стояла ПОСЛЕ письма и пропускалась при обрыве/переподключении,
+        поэтому при частых обрывах письма уходили подряд. Теперь пауза — ПЕРЕД
+        каждым письмом и соблюдается независимо от сбоев.
+        """
+        slept: list[float] = []
+        fake = FakeSmtp(fail_for={"b@x.ru": SmtpConnectionError("обрыв")})
+        monkeypatch.setattr(campaign_sender, "SmtpSession", fake)
+        campaign = make_campaign(
+            recipient_emails="a@x.ru, b@x.ru, c@x.ru", message_interval=600
+        )
+
+        campaign_sender.send_campaign(db, campaign.id, sleep=slept.append, now=_now)
+
+        # Обрыв на b не съедает паузу перед c: две паузы по 600 сек.
+        assert slept == [600, 600]
+        sent = db.execute(
+            select(CampaignLog.email).where(
+                CampaignLog.campaign_id == campaign.id, CampaignLog.status == "sent"
+            )
+        ).scalars().all()
+        assert set(sent) == {"a@x.ru", "c@x.ru"}
+
+
 class TestDailyLimit:
     """Суточный лимит писем на ящик (напр. 1000/день)."""
 

@@ -21,6 +21,7 @@ from cbmail.db.models import (
     Campaign,
     CampaignFile,
     CampaignLog,
+    MailProject,
     MessageTemplate,
     Profile,
     SmtpProfile,
@@ -42,6 +43,13 @@ _STOPPABLE = {CampaignStatus.SENDING.value, CampaignStatus.SCHEDULED.value}
 async def _user_profiles(db: AsyncSession, user: Profile) -> list[SmtpProfile]:
     rows = await db.execute(
         select(SmtpProfile).where(SmtpProfile.user_id == user.id).order_by(SmtpProfile.id)
+    )
+    return list(rows.scalars())
+
+
+async def _user_projects(db: AsyncSession, user: Profile) -> list[MailProject]:
+    rows = await db.execute(
+        select(MailProject).where(MailProject.user_id == user.id).order_by(MailProject.name)
     )
     return list(rows.scalars())
 
@@ -159,6 +167,7 @@ async def new_campaign(
         {
             "campaign": None,
             "profiles": profiles,
+            "projects": await _user_projects(db, user),
             "templates": await _templates(db),
             "action": "/campaigns/",
         },
@@ -324,6 +333,7 @@ async def edit_campaign(
         {
             "campaign": campaign,
             "profiles": profiles,
+            "projects": await _user_projects(db, user),
             "templates": await _templates(db),
             "action": f"/campaigns/{campaign_id}/edit",
         },

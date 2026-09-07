@@ -7,11 +7,11 @@ from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cbmail.core.security import CSRF_HEADER_NAME, validate_csrf_token
-from cbmail.db.models import Profile, SmtpCheckLog, SmtpProfile
+from cbmail.db.models import MailProject, Profile, SmtpCheckLog, SmtpProfile
 from cbmail.smtp.sender import SmtpCredentials, verify_credentials_async
 from cbmail.web.deps import get_db, redirect, require_user, verify_csrf
 from cbmail.web.templating import render
@@ -23,11 +23,50 @@ def _bool(value: str) -> bool:
     return str(value).lower() in {"1", "true", "on", "yes"}
 
 
+def _int(value: str, default: int = 0) -> int:
+    try:
+        return max(0, int(float(str(value).strip().replace(",", "."))))
+    except (TypeError, ValueError):
+        return default
+
+
 async def _owned(db: AsyncSession, profile_id: int, user: Profile) -> SmtpProfile | None:
     row = await db.execute(
         select(SmtpProfile).where(SmtpProfile.id == profile_id, SmtpProfile.user_id == user.id)
     )
     return row.scalar_one_or_none()
+
+
+async def _projects(db: AsyncSession, user: Profile) -> list[MailProject]:
+    rows = await db.execute(
+        select(MailProject).where(MailProject.user_id == user.id).order_by(MailProject.name)
+    )
+    return list(rows.scalars())
+
+
+async def _resolve_project(
+    db: AsyncSession, user: Profile, project_id: str, new_project: str
+) -> int | None:
+    """Определить проект для профиля: новый по названию, существующий по id, либо ничего."""
+    name = new_project.strip()
+    if name:
+        existing = await db.execute(
+            select(MailProject).where(MailProject.user_id == user.id, MailProject.name == name)
+        )
+        project = existing.scalar_one_or_none()
+        if project is None:
+            project = MailProject(name=name, user_id=user.id)
+            db.add(project)
+            await db.flush()
+        return project.id
+    if project_id.strip():
+        owned = await db.execute(
+            select(MailProject.id).where(
+                MailProject.id == _int(project_id), MailProject.user_id == user.id
+            )
+        )
+        return owned.scalar_one_or_none()
+    return None
 
 
 @router.get("/")
@@ -37,7 +76,10 @@ async def list_profiles(
     rows = await db.execute(
         select(SmtpProfile).where(SmtpProfile.user_id == user.id).order_by(SmtpProfile.id)
     )
-    return render(request, "smtp/list.html", {"profiles": list(rows.scalars()), "edit": None})
+    return render(request, "smtp/list.html", {
+        "profiles": list(rows.scalars()), "edit": None,
+        "projects": await _projects(db, user),
+    })
 
 
 @router.get("/{profile_id}/edit")
@@ -53,7 +95,10 @@ async def edit_profile(
     rows = await db.execute(
         select(SmtpProfile).where(SmtpProfile.user_id == user.id).order_by(SmtpProfile.id)
     )
-    return render(request, "smtp/list.html", {"profiles": list(rows.scalars()), "edit": profile})
+    return render(request, "smtp/list.html", {
+        "profiles": list(rows.scalars()), "edit": profile,
+        "projects": await _projects(db, user),
+    })
 
 
 @router.post("/", dependencies=[Depends(verify_csrf)])
@@ -71,7 +116,11 @@ async def create_profile(
     email_use_ssl: str = Form(""),
     message_header: str = Form(""),
     message_footer: str = Form(""),
+    daily_limit: str = Form("0"),
+    project_id: str = Form(""),
+    new_project: str = Form(""),
 ):
+    project = await _resolve_project(db, user, project_id, new_project)
     profile = SmtpProfile(
         title=title.strip() or "Профиль",
         email_host=email_host.strip(),
@@ -83,6 +132,8 @@ async def create_profile(
         email_use_ssl=_bool(email_use_ssl),
         message_header=message_header,
         message_footer=message_footer,
+        daily_limit=_int(daily_limit),
+        project_id=project,
         user_id=user.id,
     )
     db.add(profile)
@@ -106,6 +157,9 @@ async def update_profile(
     email_use_ssl: str = Form(""),
     message_header: str = Form(""),
     message_footer: str = Form(""),
+    daily_limit: str = Form("0"),
+    project_id: str = Form(""),
+    new_project: str = Form(""),
 ):
     profile = await _owned(db, profile_id, user)
     if profile is None:
@@ -123,6 +177,8 @@ async def update_profile(
     profile.email_use_ssl = _bool(email_use_ssl)
     profile.message_header = message_header
     profile.message_footer = message_footer
+    profile.daily_limit = _int(daily_limit)
+    profile.project_id = await _resolve_project(db, user, project_id, new_project)
     await db.commit()
     return redirect("/smtp/", ok="Профиль обновлён.")
 
@@ -139,6 +195,45 @@ async def delete_profile(
     await db.execute(delete(SmtpProfile).where(SmtpProfile.id == profile_id))
     await db.commit()
     return redirect("/smtp/", ok="Профиль удалён.")
+
+
+@router.post("/projects", dependencies=[Depends(verify_csrf)])
+async def create_project(
+    user: Profile = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+    project_name: str = Form(""),
+):
+    name = project_name.strip()
+    if not name:
+        return redirect("/smtp/", err="Укажите название проекта.")
+    exists = await db.execute(
+        select(MailProject).where(MailProject.user_id == user.id, MailProject.name == name)
+    )
+    if exists.scalar_one_or_none() is None:
+        db.add(MailProject(name=name, user_id=user.id))
+        await db.commit()
+    return redirect("/smtp/", ok=f"Проект «{name}» создан.")
+
+
+@router.post("/projects/{project_id}/delete", dependencies=[Depends(verify_csrf)])
+async def delete_project(
+    project_id: int,
+    user: Profile = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    owned = await db.execute(
+        select(MailProject).where(MailProject.id == project_id, MailProject.user_id == user.id)
+    )
+    project = owned.scalar_one_or_none()
+    if project is None:
+        return redirect("/smtp/", err="Проект не найден.")
+    # Открепляем почты (project_id → NULL), сами профили не трогаем.
+    await db.execute(
+        update(SmtpProfile).where(SmtpProfile.project_id == project_id).values(project_id=None)
+    )
+    await db.execute(delete(MailProject).where(MailProject.id == project_id))
+    await db.commit()
+    return redirect("/smtp/", ok=f"Проект «{project.name}» удалён (почты сохранены).")
 
 
 @router.post("/test-connection")

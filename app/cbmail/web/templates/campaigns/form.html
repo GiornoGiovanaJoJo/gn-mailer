@@ -65,9 +65,15 @@
       <div class="card-body">
         <div class="row g-3">
           <div class="col-md-4"><label class="form-label" for="c_smtp">С какой почты отправлять</label>
+            {% if projects %}
+            <select id="c_project_filter" class="form-select form-select-sm mb-1">
+              <option value="">Все проекты</option>
+              {% for pr in projects %}<option value="{{ pr.id }}">Проект: {{ pr.name }}</option>{% endfor %}
+            </select>
+            {% endif %}
             <select id="c_smtp" name="use_smtp_settings_id" class="form-select">
-              <option value="">— по умолчанию —</option>
-              {% for p in profiles %}<option value="{{ p.id }}" {% if c and c.use_smtp_settings_id == p.id %}selected{% endif %}>{{ p.label }}</option>{% endfor %}
+              <option value="" data-project="">— по умолчанию —</option>
+              {% for p in profiles %}<option value="{{ p.id }}" data-project="{{ p.project_id or '' }}" {% if c and c.use_smtp_settings_id == p.id %}selected{% endif %}>{% if p.project %}[{{ p.project.name }}] {% endif %}{{ p.label }}{% if p.daily_limit %} · лимит {{ p.daily_limit }}/день{% endif %}</option>{% endfor %}
             </select>
             <div class="form-text">Ящики настраиваются в разделе «Настройки».</div></div>
           <div class="col-md-4"><label class="form-label" for="c_from_name">Имя отправителя <span class="text-body-secondary">(по желанию)</span></label><input type="text" id="c_from_name" name="from_name" class="form-control" value="{{ c.from_name if c and c.from_name else '' }}" placeholder="Например: Магазин «Ромашка»" autocomplete="off"></div>
@@ -115,6 +121,26 @@
     }
     sel.addEventListener('change', sync);
     sync();
+  })();
+
+  // Фильтр почт по проекту: при выборе проекта в списке отправителей остаются
+  // только его ящики.
+  (function () {
+    var filter = document.getElementById('c_project_filter');
+    var smtp = document.getElementById('c_smtp');
+    if (!filter || !smtp) return;
+    filter.addEventListener('change', function () {
+      var pid = filter.value;
+      var hidSelected = false;
+      Array.prototype.forEach.call(smtp.options, function (opt) {
+        if (opt.value === '') return;
+        var match = !pid || opt.getAttribute('data-project') === pid;
+        opt.hidden = !match;
+        opt.disabled = !match;
+        if (!match && opt.selected) { opt.selected = false; hidSelected = true; }
+      });
+      if (hidSelected) smtp.value = '';
+    });
   })();
 </script>
 {% endblock %}

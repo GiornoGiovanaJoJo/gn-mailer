@@ -182,6 +182,32 @@ class Profile(Base):
 # --- Настройки SMTP ---------------------------------------------------------
 
 
+class MailProject(Base):
+    """Проект рассылки — логическая группа почтовых ящиков (``mail_mailproject``).
+
+    Позволяет закреплять за проектом набор SMTP-профилей: «Проект А» — одни
+    почты, «Проект Б» — другие. При создании рассылки отправителей можно
+    фильтровать по проекту. Таблица создаётся Django-миграцией на старой копии
+    и идемпотентным ``CREATE TABLE IF NOT EXISTS`` — на новой (см. init_session).
+    """
+
+    __tablename__ = "mail_mailproject"
+
+    id: Mapped[int] = mapped_column(BIG_INT, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str] = mapped_column(Text, default="", server_default="")
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID_TYPE, ForeignKey("useraccount_profile.id", ondelete="CASCADE")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("name", "user_id", name="mail_mailproject_name_user_id_uniq"),
+    )
+
+
 class SmtpProfile(Base):
     """Профиль SMTP пользователя (``mail_usersettingssmtp``).
 
@@ -205,6 +231,10 @@ class SmtpProfile(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID_TYPE, ForeignKey("useraccount_profile.id", ondelete="CASCADE")
     )
+    project_id: Mapped[int | None] = mapped_column(
+        BIG_INT, ForeignKey("mail_mailproject.id", ondelete="SET NULL")
+    )
+    daily_limit: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     last_check_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_check_success: Mapped[bool] = mapped_column(Boolean, default=False)
     last_error: Mapped[str | None] = mapped_column(Text)
@@ -213,6 +243,7 @@ class SmtpProfile(Base):
     failure_count: Mapped[int] = mapped_column(Integer, default=0)
 
     user: Mapped[Profile] = relationship(back_populates="smtp_profiles")
+    project: Mapped[MailProject | None] = relationship(lazy="joined")
 
     @property
     def label(self) -> str:

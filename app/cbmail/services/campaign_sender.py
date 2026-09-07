@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -85,6 +85,8 @@ class SendResult:
     skipped_invalid: int = 0
     stopped_by_user: bool = False
     already_complete: bool = False
+    deferred: bool = False
+    """Часть аудитории перенесена на следующие сутки из-за суточного лимита ящика."""
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -113,7 +115,7 @@ def send_campaign(
         # SMTP разрешаем первым: домен адреса «От кого» задаёт область отписки,
         # по которой из получателей вычитаются отписавшиеся именно от этого
         # отправителя. Так план учитывает адресные отписки, а не только глобальные.
-        credentials, from_email = _resolve_smtp(session, campaign, now=now)
+        credentials, from_email, profile = _resolve_smtp(session, campaign, now=now)
         scope_domain = email_domain(from_email)
 
         plan = _build_plan(session, campaign, scope_domain=scope_domain)
@@ -140,6 +142,22 @@ def send_campaign(
             )
             _release(session, campaign, CampaignStatus.SCHEDULED, now=now)
             return result
+
+        # Суточный лимит на ящик (напр. 1000/день). Считаем, сколько уже ушло с
+        # этого профиля сегодня, и обрезаем план до остатка. Если лимит исчерпан —
+        # переносим кампанию на начало следующих суток, не отправляя ничего.
+        capped_by_limit = False
+        remaining_today = _remaining_today(session, profile, now=now)
+        if remaining_today is not None:
+            if remaining_today <= 0:
+                _defer_to_next_day(
+                    session, campaign, "Суточный лимит ящика исчерпан", now=now
+                )
+                result.deferred = True
+                return result
+            if len(plan.recipients) > remaining_today:
+                plan = replace(plan, recipients=plan.recipients[:remaining_today])
+                capped_by_limit = True
 
         # Тело письма собирается один раз на кампанию; для каждого получателя
         # выполняется только подстановка адреса.
@@ -173,8 +191,19 @@ def send_campaign(
                 result.stopped_by_user = True
                 break
 
-        final = CampaignStatus.CANCELLED if result.stopped_by_user else CampaignStatus.SENT
-        _finish(session, campaign, final, now=now)
+        if result.stopped_by_user:
+            _finish(session, campaign, CampaignStatus.CANCELLED, now=now)
+        elif capped_by_limit:
+            # Ушла только часть из-за суточного лимита — не помечаем «Отправлена»,
+            # а переносим остаток на следующие сутки: уже отправленные адреса
+            # отфильтруются при следующем запуске автоматически.
+            _defer_to_next_day(
+                session, campaign,
+                "Достигнут суточный лимит ящика — остаток перенесён", now=now
+            )
+            result.deferred = True
+        else:
+            _finish(session, campaign, CampaignStatus.SENT, now=now)
         return result
 
     except CampaignNotSendable:
@@ -374,7 +403,7 @@ def _load_already_sent(session: Session, campaign_id: int) -> set[str]:
 
 def _resolve_smtp(
     session: Session, campaign: Campaign, *, now: Callable[[], datetime]
-) -> tuple[SmtpCredentials, str]:
+) -> tuple[SmtpCredentials, str, SmtpProfile]:
     profile = campaign.smtp
     if profile is None:
         profile = session.execute(
@@ -397,7 +426,81 @@ def _resolve_smtp(
         raise CampaignNotSendable(str(exc)) from exc
 
     from_email = resolve_from_email(credentials, campaign.from_email or profile.default_from_email)
-    return credentials, from_email
+    return credentials, from_email, profile
+
+
+# --- Суточный лимит на ящик --------------------------------------------------
+
+
+def _day_bounds(moment: datetime) -> tuple[datetime, datetime]:
+    """Границы календарных суток (UTC), в которые попадает ``moment``."""
+    start = moment.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start, start + timedelta(days=1)
+
+
+def _sent_today(session: Session, profile_id: int, *, now: Callable[[], datetime]) -> int:
+    """Сколько писем ушло с этого SMTP-профиля за текущие сутки (по логам)."""
+    start, end = _day_bounds(now())
+    return int(
+        session.execute(
+            select(func.count())
+            .select_from(CampaignLog)
+            .join(Campaign, Campaign.id == CampaignLog.campaign_id)
+            .where(
+                CampaignLog.status == LOG_SENT,
+                Campaign.use_smtp_settings_id == profile_id,
+                CampaignLog.created_at >= start,
+                CampaignLog.created_at < end,
+            )
+        ).scalar_one()
+    )
+
+
+def _remaining_today(
+    session: Session, profile: SmtpProfile, *, now: Callable[[], datetime]
+) -> int | None:
+    """Остаток суточного лимита ящика. ``None`` — лимит не задан (безлимит)."""
+    limit = getattr(profile, "daily_limit", 0) or 0
+    if limit <= 0:
+        return None
+    return max(0, limit - _sent_today(session, profile.id, now=now))
+
+
+def _next_day_start(moment: datetime) -> datetime:
+    """Начало следующих суток (00:05 UTC) — когда суточный счётчик обнулится."""
+    start, _ = _day_bounds(moment)
+    return start + timedelta(days=1, minutes=5)
+
+
+def _defer_to_next_day(
+    session: Session, campaign: Campaign | int, reason: str, *, now: Callable[[], datetime]
+) -> None:
+    """Перенести кампанию на начало следующих суток (для суточного лимита).
+
+    Ставим статус «Запланирована» и время на 00:05 следующего дня — тогда
+    планировщик подхватит кампанию, когда лимит ящика обнулится, и дошлёт
+    остаток (уже отправленные адреса отфильтруются автоматически).
+    """
+    campaign_id = campaign if isinstance(campaign, int) else campaign.id
+    next_run = _next_day_start(now())
+    session.add(
+        CampaignLog(
+            campaign_id=campaign_id,
+            email=LOG_SYSTEM,
+            status="deferred",
+            error_message=(f"{reason}. Перенесено на {next_run:%d.%m.%Y %H:%M} UTC.")[:2000],
+        )
+    )
+    session.execute(
+        update(Campaign)
+        .where(Campaign.id == campaign_id)
+        .values(
+            status=CampaignStatus.SCHEDULED.value,
+            scheduled_time=next_run,
+            updated_at=now(),
+        )
+    )
+    session.commit()
 
 
 def _compose(campaign: Campaign) -> composer.ComposedMessage:

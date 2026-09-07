@@ -401,6 +401,85 @@ class TestCancellation:
         assert db.get(Campaign, campaign.id).status == "cancelled"  # type: ignore[union-attr]
 
 
+class TestDailyLimit:
+    """Суточный лимит писем на ящик (напр. 1000/день)."""
+
+    def test_no_limit_sends_all(self, db: Session, make_campaign, smtp: FakeSmtp, smtp_profile) -> None:
+        smtp_profile.daily_limit = 0
+        db.commit()
+        campaign = make_campaign(recipient_emails="a@x.ru, b@x.ru, c@x.ru")
+
+        result = _send(db, campaign.id)
+
+        assert smtp.sent == ["a@x.ru", "b@x.ru", "c@x.ru"]
+        assert not result.deferred
+
+    def test_limit_caps_run_and_defers_remainder(
+        self, db: Session, make_campaign, smtp: FakeSmtp, smtp_profile
+    ) -> None:
+        smtp_profile.daily_limit = 2
+        db.commit()
+        campaign = make_campaign(recipient_emails="a@x.ru, b@x.ru, c@x.ru")
+
+        result = _send(db, campaign.id)
+
+        # За этот заход ушло только 2 адреса из 3.
+        assert smtp.sent == ["a@x.ru", "b@x.ru"]
+        assert result.deferred
+        db.expire_all()
+        refreshed = db.get(Campaign, campaign.id)
+        assert refreshed is not None
+        # Кампания не «Отправлена», а перенесена на следующие сутки.
+        assert refreshed.status == "scheduled"
+        assert refreshed.scheduled_time is not None
+        # SQLite возвращает время без tz — сравниваем с наивным NOW.
+        assert refreshed.scheduled_time.replace(tzinfo=None) > NOW.replace(tzinfo=None)
+        # Записан системный лог о переносе.
+        deferred = db.execute(
+            select(CampaignLog).where(
+                CampaignLog.campaign_id == campaign.id, CampaignLog.status == "deferred"
+            )
+        ).scalars().all()
+        assert len(deferred) == 1
+
+    def test_limit_exhausted_defers_without_sending(
+        self, db: Session, make_campaign, smtp: FakeSmtp, smtp_profile
+    ) -> None:
+        smtp_profile.daily_limit = 2
+        db.commit()
+        campaign = make_campaign(recipient_emails="a@x.ru, b@x.ru, c@x.ru")
+        # Сегодня с этого ящика уже ушло 2 письма (в пределах суток NOW).
+        for addr in ("old1@x.ru", "old2@x.ru"):
+            db.add(CampaignLog(campaign_id=campaign.id, email=addr, status="sent", created_at=NOW))
+        db.commit()
+
+        result = _send(db, campaign.id)
+
+        assert smtp.sent == []
+        assert result.deferred
+        db.expire_all()
+        assert db.get(Campaign, campaign.id).status == "scheduled"  # type: ignore[union-attr]
+
+    def test_yesterday_sends_do_not_count(
+        self, db: Session, make_campaign, smtp: FakeSmtp, smtp_profile
+    ) -> None:
+        smtp_profile.daily_limit = 2
+        db.commit()
+        campaign = make_campaign(recipient_emails="a@x.ru, b@x.ru")
+        # Письмо, отправленное вчера, не должно занимать сегодняшний лимит.
+        db.add(CampaignLog(
+            campaign_id=campaign.id, email="yst@x.ru", status="sent",
+            created_at=NOW - timedelta(days=1),
+        ))
+        db.commit()
+
+        result = _send(db, campaign.id)
+
+        # Лимит 2, вчерашнее не считается — сегодня уходят оба адреса.
+        assert smtp.sent == ["a@x.ru", "b@x.ru"]
+        assert not result.deferred
+
+
 class TestScheduling:
     def test_due_campaign_is_found(self, db: Session, make_campaign) -> None:
         make_campaign(status="scheduled", scheduled_time=NOW - timedelta(minutes=1))

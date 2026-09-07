@@ -31,13 +31,15 @@
         {% if profiles %}
         <div class="table-responsive">
           <table class="table table-sm align-middle">
-            <thead class="table-light"><tr><th>Название</th><th>SMTP-сервер</th><th>Отправитель</th><th>Проверка</th><th class="text-end">Действия</th></tr></thead>
+            <thead class="table-light"><tr><th>Название</th><th>Проект</th><th>SMTP-сервер</th><th>Отправитель</th><th>Лимит/день</th><th>Проверка</th><th class="text-end">Действия</th></tr></thead>
             <tbody>
             {% for p in profiles %}
               <tr {% if e and e.id == p.id %}class="table-primary"{% endif %}>
                 <td class="fw-medium">{{ p.title or '—' }}</td>
+                <td>{% if p.project %}<span class="badge bg-label-primary">{{ p.project.name }}</span>{% else %}—{% endif %}</td>
                 <td>{{ p.email_host or '—' }}{% if p.email_port %}:{{ p.email_port }}{% endif %}{% if p.email_use_ssl %} · SSL{% elif p.email_use_tls %} · TLS{% endif %}</td>
                 <td>{{ p.default_from_email or p.email_host_user or '—' }}</td>
+                <td>{% if p.daily_limit %}{{ p.daily_limit }}{% else %}<span class="text-body-secondary small">без лимита</span>{% endif %}</td>
                 <td>{% if p.last_check_time %}<span class="badge bg-label-{{ 'success' if p.last_check_success else 'danger' }}">{{ 'OK' if p.last_check_success else 'ошибка' }}</span>{% else %}<span class="text-body-secondary small">—</span>{% endif %}</td>
                 <td class="text-end" style="white-space:nowrap">
                   <a href="/smtp/{{ p.id }}/edit" class="btn btn-sm btn-outline-secondary" title="Редактировать" aria-label="Редактировать профиль"><i class="icon-base bx bx-edit"></i></a>
@@ -52,6 +54,27 @@
         {% else %}
         <div class="alert alert-info mb-0">У вас пока нет почтовых профилей. Заполните форму ниже, чтобы добавить первый.</div>
         {% endif %}
+      </div>
+
+      <!-- Проекты -->
+      <div class="mb-4">
+        <h5 class="mb-3">Проекты <small class="text-body-secondary">(группы почт)</small></h5>
+        {% if projects %}
+        <div class="d-flex flex-wrap gap-2 mb-3">
+          {% for pr in projects %}
+          <span class="badge bg-label-primary d-inline-flex align-items-center">{{ pr.name }}
+            <form method="post" action="/smtp/projects/{{ pr.id }}/delete" class="d-inline ms-1" onsubmit="return confirm('Удалить проект «{{ pr.name }}»? Почты сохранятся, просто открепятся.');">{{ csrf_input(request)|safe }}<button class="btn btn-xs btn-link text-danger p-0" style="line-height:1" title="Удалить проект">&times;</button></form>
+          </span>
+          {% endfor %}
+        </div>
+        {% else %}
+        <div class="alert alert-info py-2">Проектов пока нет. Создайте первый, чтобы группировать почты.</div>
+        {% endif %}
+        <form method="post" action="/smtp/projects" class="d-flex gap-2" style="max-width:440px">
+          {{ csrf_input(request)|safe }}
+          <input type="text" name="project_name" class="form-control form-control-sm" placeholder="Название проекта (напр. «Grand Comfort»)" required>
+          <button class="btn btn-sm btn-outline-primary" style="white-space:nowrap"><i class="icon-base bx bx-plus"></i> Создать</button>
+        </form>
       </div>
 
       <h5 class="mb-3">{{ 'Редактирование профиля' if e else 'Новый профиль' }}</h5>
@@ -107,6 +130,30 @@
         <div class="row">
           <div class="col-md-6"><div class="form-check mb-3"><input class="form-check-input" type="checkbox" id="tls" name="email_use_tls" value="1" {% if e and e.email_use_tls %}checked{% endif %}><label class="form-check-label" for="tls">Использовать TLS</label><div class="info-text">Обычно для порта 587.</div></div></div>
           <div class="col-md-6"><div class="form-check mb-3"><input class="form-check-input" type="checkbox" id="ssl" name="email_use_ssl" value="1" {% if e and e.email_use_ssl %}checked{% endif %}><label class="form-check-label" for="ssl">Использовать SSL</label><div class="info-text">Обычно для порта 465.</div></div></div>
+        </div>
+
+        <h6 class="text-body-secondary text-uppercase small mb-3 mt-4">Проект и суточный лимит</h6>
+        <div class="row">
+          <div class="col-md-6">
+            <div class="mb-3">
+              <label class="form-label" for="smtp_project"><i class="icon-base bx bx-folder me-1"></i>Проект</label>
+              <select id="smtp_project" name="project_id" class="form-select">
+                <option value="">— без проекта —</option>
+                {% for pr in projects %}
+                <option value="{{ pr.id }}" {% if e and e.project_id == pr.id %}selected{% endif %}>{{ pr.name }}</option>
+                {% endfor %}
+              </select>
+              <input type="text" name="new_project" class="form-control mt-2" placeholder="…или впишите название нового проекта" autocomplete="off">
+              <div class="info-text">Группирует почты по проектам. При создании рассылки можно отфильтровать ящики нужного проекта.</div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="mb-3">
+              <label class="form-label" for="smtp_daily_limit"><i class="icon-base bx bx-calendar me-1"></i>Суточный лимит писем</label>
+              <input type="number" min="0" step="1" id="smtp_daily_limit" name="daily_limit" class="form-control" value="{{ e.daily_limit if e else 0 }}" placeholder="0">
+              <div class="info-text">Максимум писем с этого ящика за сутки. <b>0 = без лимита.</b> Например, 1000 — тогда рассылка на большее число адресов уйдёт частями по дням.</div>
+            </div>
+          </div>
         </div>
 
         <h6 class="text-body-secondary text-uppercase small mb-3 mt-4">Шапка и подвал сообщений</h6>

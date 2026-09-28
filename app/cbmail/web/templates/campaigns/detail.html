@@ -40,6 +40,14 @@
     {% if c.status in ['draft','cancelled','scheduled'] %}
     <a href="/campaigns/{{ c.id }}/edit" class="btn btn-outline-primary"><i class="bx bx-edit me-1"></i>Редактировать</a>
     <form method="post" action="/campaigns/{{ c.id }}/send" class="d-inline" onsubmit="return confirm('Запустить отправку сейчас?')">{{ csrf_input(request)|safe }}<button class="btn btn-success"><i class="bx bx-send me-1"></i>Отправить сейчас</button></form>
+    <!-- Проверочное письмо: вёрстку письма видно только в настоящем почтовом
+         клиенте, предпросмотр в браузере этого не показывает. -->
+    <form method="post" action="/campaigns/{{ c.id }}/test" class="d-flex gap-1">
+      {{ csrf_input(request)|safe }}
+      <input type="email" name="test_email" class="form-control form-control-sm" style="max-width:15rem"
+             placeholder="Проверить на адресе…" required>
+      <button class="btn btn-outline-secondary btn-sm text-nowrap"><i class="bx bx-test-tube me-1"></i>Проверить</button>
+    </form>
     {% endif %}
     {% if stoppable %}
     <form method="post" action="/campaigns/{{ c.id }}/stop" class="d-inline" onsubmit="return confirm('Остановить рассылку? Кампания сохранится.')">{{ csrf_input(request)|safe }}<button class="btn btn-warning"><i class="bx bx-stop-circle me-1"></i>Стоп</button></form>

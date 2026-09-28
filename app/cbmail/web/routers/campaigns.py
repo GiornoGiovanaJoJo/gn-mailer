@@ -13,6 +13,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,7 +29,14 @@ from cbmail.db.models import (
 )
 from cbmail.domain import composer
 from cbmail.domain.campaign import CampaignStatus, clamp_batch_size, clamp_interval
-from cbmail.domain.emails import join_emails, parse_emails, split_emails
+from cbmail.domain.emails import (
+    is_valid_email,
+    join_emails,
+    normalize_email,
+    parse_emails,
+    split_emails,
+)
+from cbmail.domain.recipients import RecipientFileError, extract_emails
 from cbmail.web.deps import get_db, redirect, require_user, verify_csrf
 from cbmail.web.pagination import Page, offset, parse_page
 from cbmail.web.templating import render
@@ -129,6 +137,29 @@ async def _save_attachments(
     return saved, warnings
 
 
+async def _emails_from_file(upload: UploadFile | None) -> tuple[list[str], str | None, str | None]:
+    """Адреса из загруженного файла: (адреса, сообщение, ошибка).
+
+    Списки приходят выгрузкой из 1С или CRM, а не текстом в поле. Разбор
+    отделён от формы, чтобы ошибку файла можно было показать рядом с полем, а
+    не терять рассылку целиком: адреса, вписанные руками, при этом сохраняются.
+    """
+    if upload is None or not upload.filename:
+        return [], None, None
+    data = await upload.read()
+    try:
+        result = extract_emails(upload.filename, data)
+    except RecipientFileError as exc:
+        return [], None, f"Файл «{upload.filename}»: {exc}"
+
+    parts = [f"из файла добавлено адресов: {len(result.emails)}"]
+    if result.skipped_duplicates:
+        parts.append(f"повторов пропущено: {result.skipped_duplicates}")
+    if result.skipped_invalid:
+        parts.append(f"строк не принято: {result.skipped_invalid}")
+    return result.emails, "; ".join(parts), None
+
+
 # --- Список ------------------------------------------------------------------
 
 
@@ -193,10 +224,17 @@ async def create_campaign(
     scheduled_time: str = Form(""),
     intent: str = Form("draft"),
     attachments: list[UploadFile] = File(default=[]),
+    recipients_file: UploadFile | None = File(default=None),
 ):
     message = await _resolve_message(db, message, template_id)
     valid, invalid = split_emails(recipient_emails)
-    error = _validate(name, subject, message, valid)
+    from_file, file_notice, file_error = await _emails_from_file(recipients_file)
+    # Адреса из файла дописываются к вписанным руками: человек нередко
+    # добавляет к выгрузке пару адресов «и ещё этим».
+    for email in from_file:
+        if email not in valid:
+            valid.append(email)
+    error = file_error or _validate(name, subject, message, valid)
     scheduled = _parse_schedule(scheduled_time)
     # send_now не требует даты; schedule — требует
     if intent == "schedule" and scheduled is None:
@@ -247,6 +285,8 @@ async def create_campaign(
     await db.commit()
 
     note = "Кампания создана."
+    if file_notice:
+        warnings.append(file_notice.capitalize() + ".")
     if invalid:
         warnings.append(f"Не приняты как адреса: {len(invalid)} шт.")
     if warnings:
@@ -360,6 +400,7 @@ async def update_campaign(
     scheduled_time: str = Form(""),
     intent: str = Form("draft"),
     attachments: list[UploadFile] = File(default=[]),
+    recipients_file: UploadFile | None = File(default=None),
 ):
     campaign = await _get_owned(db, campaign_id, user)
     if campaign is None:
@@ -369,7 +410,11 @@ async def update_campaign(
 
     message = await _resolve_message(db, message, template_id)
     valid, invalid = split_emails(recipient_emails)
-    error = _validate(name, subject, message, valid)
+    from_file, file_notice, file_error = await _emails_from_file(recipients_file)
+    for email in from_file:
+        if email not in valid:
+            valid.append(email)
+    error = file_error or _validate(name, subject, message, valid)
     scheduled = _parse_schedule(scheduled_time)
     if intent == "schedule" and scheduled is None:
         error = error or "Для планирования укажите корректные дату и время."
@@ -412,6 +457,8 @@ async def update_campaign(
     await db.commit()
 
     note = "Изменения сохранены."
+    if file_notice:
+        warnings.append(file_notice.capitalize() + ".")
     if invalid:
         warnings.append(f"Не приняты как адреса: {len(invalid)} шт.")
     if warnings:
@@ -444,6 +491,54 @@ async def stop_campaign(
     )
     await db.commit()
     return redirect(f"/campaigns/{campaign_id}", ok="Рассылка остановлена. Кампания сохранена.")
+
+
+@router.post("/{campaign_id}/test", dependencies=[Depends(verify_csrf)])
+async def send_test(
+    campaign_id: int,
+    user: Profile = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+    test_email: str = Form(""),
+):
+    """Отправить письмо кампании на один адрес — посмотреть глазами до рассылки.
+
+    Вёрстку письма видно только в настоящем почтовом клиенте: предпросмотр в
+    браузере не показывает, как Mail.ru обрежет стили, а Outlook — таблицы.
+    Раньше проверяли рассылкой на «свой» адрес, заведя кампанию-двойник, и
+    иногда отправляли этого двойника всем.
+    """
+    campaign = await _get_owned(db, campaign_id, user)
+    if campaign is None:
+        return redirect("/campaigns/", err="Кампания не найдена.")
+
+    address = normalize_email(test_email)
+    if not is_valid_email(address):
+        return redirect(f"/campaigns/{campaign_id}", err="Укажите корректный адрес для проверки.")
+
+    # Импорт внутри обработчика: отправка тянет SMTP-слой и синхронную сессию,
+    # и модулю маршрутов они нужны ровно здесь.
+    from cbmail.db.session import sync_session_scope
+    from cbmail.services.campaign_sender import CampaignNotSendable, send_test_email
+    from cbmail.smtp.sender import SmtpError
+
+    def _send() -> None:
+        # Отдельная синхронная сессия: SMTP-отправка блокирующая, и держать на
+        # ней асинхронное соединение запроса нельзя.
+        with sync_session_scope() as session:
+            target = session.get(Campaign, campaign_id)
+            if target is None:
+                raise CampaignNotSendable("Кампания не найдена")
+            send_test_email(session, target, address)
+
+    try:
+        await run_in_threadpool(_send)
+    except (SmtpError, CampaignNotSendable) as exc:
+        return redirect(f"/campaigns/{campaign_id}", err=f"Проверочное письмо не ушло: {exc}")
+
+    return redirect(
+        f"/campaigns/{campaign_id}",
+        ok=f"Проверочное письмо отправлено на {address}. В статистику кампании оно не попадёт.",
+    )
 
 
 @router.post("/{campaign_id}/delete", dependencies=[Depends(verify_csrf)])

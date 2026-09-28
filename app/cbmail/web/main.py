@@ -30,6 +30,7 @@ from cbmail.web.routers import (
     public,
     smtp,
     stoplist,
+    tracking,
     users,
 )
 from cbmail.web.routers import auth as auth_router
@@ -120,6 +121,7 @@ def create_app() -> FastAPI:
     app.include_router(users.router)
     app.include_router(account.router)
     app.include_router(public.router)
+    app.include_router(tracking.router)
     return app
 
 

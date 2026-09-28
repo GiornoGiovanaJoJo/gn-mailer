@@ -34,6 +34,16 @@ _NEW_TABLES = (Session, Unsubscribe, MailProject)
 # трогает (таблица уже есть), поэтому добавляем точечным идемпотентным ALTER.
 # ``ADD COLUMN IF NOT EXISTS`` — Postgres-специфично; на SQLite (тесты) эти
 # колонки и так создаются из моделей через create_all, поэтому ALTER пропускаем.
+# Колонки трекинга на журнале рассылки: счётчики «открыто» и «переходов»
+# заполняются пикселем и редиректом, а отметка на строке журнала не даёт
+# засчитать одному получателю два открытия.
+_LOG_COLUMN_ALTERS = (
+    'ALTER TABLE mail_massmaillog ADD COLUMN IF NOT EXISTS opened_at timestamptz',
+    'ALTER TABLE mail_massmaillog ADD COLUMN IF NOT EXISTS clicked_at timestamptz',
+    'CREATE INDEX IF NOT EXISTS mail_massmaillog_campaign_email_idx '
+    'ON mail_massmaillog (campaign_id, email)',
+)
+
 _SMTP_COLUMN_ALTERS = (
     'ALTER TABLE mail_usersettingssmtp ADD COLUMN IF NOT EXISTS daily_limit integer NOT NULL DEFAULT 0',
     'ALTER TABLE mail_usersettingssmtp ADD COLUMN IF NOT EXISTS project_id bigint '
@@ -54,6 +64,11 @@ def ensure_app_tables() -> None:
             for ddl in _SMTP_COLUMN_ALTERS:
                 conn.execute(text(ddl))
         logger.info("Колонки daily_limit/project_id на mail_usersettingssmtp готовы")
+
+        with engine.begin() as conn:
+            for ddl in _LOG_COLUMN_ALTERS:
+                conn.execute(text(ddl))
+        logger.info("Колонки трекинга на mail_massmaillog готовы")
 
 
 # Прежнее имя — чтобы не ломать внешние вызовы, если где-то остались.

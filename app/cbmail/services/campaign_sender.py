@@ -48,7 +48,7 @@ from cbmail.db.models import (
     StopListRow,
     Unsubscribe,
 )
-from cbmail.domain import composer
+from cbmail.domain import composer, tracking
 from cbmail.domain.campaign import CampaignStatus, build_send_plan, clamp_batch_size, clamp_interval
 from cbmail.domain.emails import email_domain, normalize_email, parse_emails
 from cbmail.smtp.sender import (
@@ -700,10 +700,21 @@ def _send_batch(
 
             unsub_url = composer.build_unsubscribe_url(base_url, email, scope=scope_domain)
             personalized = message.personalize(email, unsub_url)
+            # Пиксель открытия и переходы по ссылкам. Встраиваются после
+            # подстановок: иначе адрес получателя в ссылке отписки не попал бы
+            # в письмо, а счётчики считали бы одно письмо на всех.
+            html_body = tracking.inject(
+                personalized.html_body,
+                base_url=base_url,
+                secret=get_settings().secret_key,
+                campaign_id=campaign_id,
+                email=email,
+                unsubscribe_url=unsub_url,
+            )
             outgoing = OutgoingMessage(
                 subject=personalized.subject,
                 text_body=personalized.text_body,
-                html_body=personalized.html_body,
+                html_body=html_body,
                 from_email=from_email,
                 attachments=attachments,
                 headers={
@@ -858,3 +869,42 @@ def iter_recipients_preview(campaign: Campaign, limit: int = 50) -> Iterator[str
         if index >= limit:
             return
         yield email
+
+
+def send_test_email(session: Session, campaign: Campaign, recipient: str) -> None:
+    """Отправить одно письмо кампании на указанный адрес.
+
+    Проверка перед рассылкой: увидеть письмо своими глазами в реальном почтовом
+    клиенте — единственный способ заметить поехавшую вёрстку, неподставленное
+    имя или подпись не того отправителя. Предпросмотр в браузере этого не
+    показывает: почтовые клиенты режут стили по-своему.
+
+    Отличия от боевой отправки, и каждое намеренно:
+
+    * ничего не пишется в журнал кампании — иначе адрес попал бы в «уже
+      отправлено» и на рассылке его бы пропустили;
+    * счётчики кампании не трогаются: тестовое письмо не часть статистики;
+    * трекинг не встраивается — открытие проверочного письма не должно
+      попадать в отчёт;
+    * суточный лимит ящика не расходуется на проверку.
+
+    Исключения (``SmtpError``, ``CampaignNotSendable``) пробрасываются: текст
+    ошибки нужно показать человеку рядом с кнопкой, а не прятать в журнал.
+    """
+    credentials, from_email, _profile = _resolve_smtp(
+        session, campaign, now=lambda: datetime.now(timezone.utc)
+    )
+    message = _compose(campaign)
+    personalized = message.personalize(
+        recipient,
+        composer.build_unsubscribe_url(_base_url(), recipient, scope=email_domain(from_email)),
+    )
+    outgoing = OutgoingMessage(
+        subject=f"[Проверка] {personalized.subject}",
+        text_body=personalized.text_body,
+        html_body=personalized.html_body,
+        from_email=from_email,
+        attachments=_load_attachments(session, campaign),
+    )
+    with SmtpSession(credentials) as smtp:
+        smtp.send(outgoing, recipient)

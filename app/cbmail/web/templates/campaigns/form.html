@@ -57,6 +57,15 @@
         <div class="mb-3"><label class="form-label" for="c_recipients">Кому отправить — список адресов</label>
           <textarea id="c_recipients" name="recipient_emails" class="form-control" rows="5" placeholder="ivan@mail.ru, petr@mail.ru&#10;anna@mail.ru">{{ c.recipient_emails if c else '' }}</textarea>
           <div class="form-text">Впишите email-адреса через запятую или каждый с новой строки. Повторы уберём сами.</div></div>
+        <div class="mb-3">
+          <label class="form-label" for="c_recipients_file">…или загрузите файл со списком</label>
+          <input id="c_recipients_file" name="recipients_file" type="file" class="form-control"
+                 accept=".txt,.csv,.xlsx,.xls">
+          <div class="form-text">
+            XLSX, XLS, CSV или TXT — адреса найдём в любой колонке и на любом листе.
+            Они добавятся к тем, что вписаны выше; повторы уберём.
+          </div>
+        </div>
         <div class="mb-0"><label class="form-label" for="c_stoplist">Кого НЕ отправлять <span class="text-body-secondary">(по желанию)</span></label>
           <textarea id="c_stoplist" name="stop_list" class="form-control" rows="2" placeholder="Адреса, которые нужно пропустить в этой рассылке">{{ c.stop_list if c else '' }}</textarea></div>
       </div>

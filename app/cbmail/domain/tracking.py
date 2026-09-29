@@ -56,6 +56,17 @@ def sign(secret: str, payload: str) -> str:
     return _b64(digest)
 
 
+def _same(expected: str, given: str) -> bool:
+    """Сравнение подписей за постоянное время.
+
+    Сравниваем байты, а не строки: ``hmac.compare_digest`` на строках с
+    не-ASCII символами бросает TypeError, а подпись приходит из адреса письма —
+    туда можно подставить что угодно. Ссылка вида ``?s=подделка`` роняла бы
+    обработчик пятисотой вместо честного «некорректная ссылка».
+    """
+    return hmac.compare_digest(expected.encode("utf-8"), given.encode("utf-8"))
+
+
 def make_token(secret: str, campaign_id: int, email: str) -> str:
     """Токен получателя: «кто и в какой кампании», плюс подпись."""
     payload = _b64(f"{campaign_id}:{email}".encode())
@@ -67,7 +78,7 @@ def parse_token(secret: str, token: str) -> tuple[int, str] | None:
     payload, _, signature = (token or "").partition(".")
     if not payload or not signature:
         return None
-    if not hmac.compare_digest(sign(secret, payload), signature):
+    if not _same(sign(secret, payload), signature):
         return None
     try:
         decoded = _unb64(payload).decode("utf-8")
@@ -87,7 +98,7 @@ def click_signature(secret: str, token: str, url: str) -> str:
 def verify_click(secret: str, token: str, url: str, signature: str) -> bool:
     if not signature:
         return False
-    return hmac.compare_digest(click_signature(secret, token, url), signature)
+    return _same(click_signature(secret, token, url), signature)
 
 
 def pixel_url(base_url: str, token: str) -> str:

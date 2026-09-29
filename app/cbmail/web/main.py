@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from cbmail.core.config import get_settings
 from cbmail.core.licensing import LICENSE_ALLOW_PREFIXES, verify_license
 from cbmail.web.deps import FLASH_COOKIE, _RedirectException, read_flash
+from cbmail.web.errors import install_error_handlers
 from cbmail.web.routers import (
     account,
     campaigns,
@@ -106,6 +107,10 @@ def create_app() -> FastAPI:
     @app.exception_handler(_RedirectException)
     async def _handle_redirect(request, exc: _RedirectException):
         return RedirectResponse(exc.url, status_code=303)
+
+    # Неожиданные ошибки — с кодом обращения и отдельным разбором случая
+    # «база отстала от кода» (см. cbmail/web/errors.py).
+    install_error_handlers(app)
 
     _mount_static(app, settings)
 

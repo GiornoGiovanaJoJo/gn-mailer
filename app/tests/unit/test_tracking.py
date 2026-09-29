@@ -137,3 +137,27 @@ def test_click_url_is_stable_for_same_inputs() -> None:
     first = click_url(BASE, token, SECRET, "https://example.ru/a")
     second = click_url(BASE, token, SECRET, "https://example.ru/a")
     assert first == second
+
+
+def test_non_ascii_signature_is_rejected_not_crashed() -> None:
+    """Подпись из адреса письма может содержать что угодно, включая кириллицу.
+
+    hmac.compare_digest на строках с не-ASCII бросает TypeError: ссылка вида
+    «?s=подделка» роняла обработчик пятисотой вместо честного отказа.
+    """
+    token = make_token(SECRET, 1, "ivan@example.ru")
+    assert not verify_click(SECRET, token, "https://example.ru", "подделка")
+    assert not verify_click(SECRET, token, "https://example.ru", "🙂")
+
+
+def test_non_ascii_token_signature_is_rejected() -> None:
+    assert parse_token(SECRET, "payload.подпись") is None
+    assert parse_token(SECRET, "пайлоад.подпись") is None
+
+
+def test_non_ascii_target_url_still_verifies() -> None:
+    # Кириллица в адресе назначения — обычное дело для рунета, и подпись
+    # обязана сходиться.
+    token = make_token(SECRET, 1, "ivan@example.ru")
+    target = "https://пример.рф/акция"
+    assert verify_click(SECRET, token, target, click_signature(SECRET, token, target))

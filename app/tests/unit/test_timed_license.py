@@ -1,7 +1,13 @@
 """Timed-лицензии: ключ действует N часов с момента ВВОДА, не с даты.
 
 Подписываем эфемерной парой ключей и подменяем публичный ключ приложения и
-host_id — так тестируется весь путь install → verify без боевого приватного ключа.
+host_id — так тестируется весь путь install → verify без боевого приватного
+ключа.
+
+Проверку зовём через ``_verify_uncached``, а не через публичную
+``verify_license``: та кеширует результат и в безлицензионной сборке может быть
+замкнута на «годен». Разбор ключей от этого не зависит и проверяется напрямую —
+тесты одинаково верны и когда проверка включена, и когда выключена.
 """
 
 from __future__ import annotations
@@ -49,7 +55,7 @@ def _timed_payload(hours: int = 6, nonce: str = "n1") -> dict:
 def test_timed_key_activates_and_is_valid(signer, monkeypatch):
     ok, reason = licensing.install_license(signer(_timed_payload()))
     assert ok, reason
-    valid, msg = licensing.verify_license(force=True)
+    valid, msg = licensing._verify_uncached()
     assert valid
     assert "активна" in msg
 
@@ -61,7 +67,7 @@ def test_timed_key_expires_after_duration(signer, tmp_path):
     doc = json.loads(path.read_text(encoding="utf-8"))
     doc["activated_at"] = (datetime.now(timezone.utc) - timedelta(hours=7)).isoformat()
     path.write_text(json.dumps(doc), encoding="utf-8")
-    valid, msg = licensing.verify_license(force=True)
+    valid, msg = licensing._verify_uncached()
     assert not valid
     assert "expired" in msg
 
@@ -72,10 +78,10 @@ def test_timed_key_survives_reactivation_resets_clock(signer, tmp_path):
     doc = json.loads(path.read_text(encoding="utf-8"))
     doc["activated_at"] = (datetime.now(timezone.utc) - timedelta(hours=5, minutes=59)).isoformat()
     path.write_text(json.dumps(doc), encoding="utf-8")
-    assert licensing.verify_license(force=True)[0]
+    assert licensing._verify_uncached()[0]
     # Ввод другого ключа сбрасывает отсчёт заново.
     licensing.install_license(signer(_timed_payload(nonce="b")))
-    valid, msg = licensing.verify_license(force=True)
+    valid, msg = licensing._verify_uncached()
     assert valid
     assert "активна" in msg
 
@@ -92,4 +98,4 @@ def test_perpetual_absolute_key_still_valid(signer):
     payload = {"host_id": _HOST, "customer": "c", "issued": "2026-08-01", "expires": None}
     ok, _ = licensing.install_license(signer(payload))
     assert ok
-    assert licensing.verify_license(force=True)[0]
+    assert licensing._verify_uncached()[0]

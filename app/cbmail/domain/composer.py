@@ -16,6 +16,12 @@ from dataclasses import dataclass
 from html import unescape
 from html.parser import HTMLParser
 
+from cbmail.domain.html_document import (
+    ensure_email_document,
+    insert_into_body,
+    relax_fixed_widths,
+)
+
 # Плейсхолдер, который пользователь ставит в тело письма руками — обычно внутри
 # ссылки отписки вида https://site/unsubscribe/{{email}}/
 EMAIL_PLACEHOLDER = "{{email}}"
@@ -83,9 +89,7 @@ def compose(
     want_footer = add_unsubscribe and not has_placeholder
 
     if body_is_html:
-        html_body = _wrap_html(body, header=header, footer=footer)
-        if want_footer:
-            html_body += _html_unsub_footer()
+        html_body = _wrap_html(body, header=header, footer=footer, add_unsubscribe=want_footer)
         text_body = html_to_text(html_body)
         return ComposedMessage(subject=subject, text_body=text_body, html_body=html_body)
 
@@ -104,20 +108,35 @@ def _join_parts(header: str | None, body: str, footer: str | None) -> str:
     return "\n\n".join(parts)
 
 
-def _wrap_html(body: str, *, header: str | None, footer: str | None) -> str:
-    """Добавить шапку и подвал к HTML-телу.
+def _wrap_html(
+    body: str,
+    *,
+    header: str | None,
+    footer: str | None,
+    add_unsubscribe: bool = False,
+) -> str:
+    """Добавить шапку, подвал и ссылку отписки к HTML-телу.
 
     Шапка и подвал задаются в настройках профиля обычным текстом, поэтому
     экранируются — иначе символ ``<`` в подписи ломал вёрстку письма, а
     вставленный туда тег мог изменить его содержимое.
+
+    Кладутся они внутрь ``<body>``, а не вокруг документа. Раньше шапка
+    попадала перед ``<!DOCTYPE>``, а подвал и ссылка отписки — после
+    ``</html>``: строгие почтовые клиенты такое выбрасывают, и получатель
+    оставался без «Отписаться», ради которой подвал и добавляется.
+
+    Заодно письмо приводится к годному для почты виду: жёсткие ширины из старой
+    вёрстки становятся потолком, а в ``<head>`` появляются charset и viewport.
     """
-    chunks: list[str] = []
-    if header and header.strip():
-        chunks.append(f"<div>{_escape_to_html(header)}</div>")
-    chunks.append(body)
+    document = ensure_email_document(relax_fixed_widths(body))
+    before = f"<div>{_escape_to_html(header)}</div>" if header and header.strip() else ""
+    tail: list[str] = []
     if footer and footer.strip():
-        chunks.append(f"<div>{_escape_to_html(footer)}</div>")
-    return "\n".join(chunks)
+        tail.append(f"<div>{_escape_to_html(footer)}</div>")
+    if add_unsubscribe:
+        tail.append(_html_unsub_footer())
+    return insert_into_body(document, before=before, after="\n".join(tail))
 
 
 def _escape_to_html(text: str) -> str:
@@ -147,6 +166,15 @@ def looks_like_html(text: str | None) -> bool:
 # Теги, чьё содержимое в текстовую версию попадать не должно вообще.
 _INVISIBLE_TAGS = frozenset({"style", "script", "head", "title", "meta", "link"})
 
+# Из них — одиночные: закрывающей пары у них не бывает.
+#
+# Раньше ``<meta>`` увеличивал счётчик невидимой области и ничем его не
+# возвращал, поэтому весь текст после него пропадал. Любое письмо из визуального
+# редактора начинается с ``<meta charset>`` — значит, уходило оно с ПУСТОЙ
+# текстовой версией: в превью почтовых сервисов такое письмо выглядит пустым, а
+# спам-фильтры считают его подозрительным.
+_VOID_INVISIBLE_TAGS = frozenset({"meta", "link"})
+
 # Теги, после которых нужен перенос строки.
 _LINE_BREAK_TAGS = frozenset({"br", "tr", "li", "div", "p", "h1", "h2", "h3", "h4", "h5", "h6"})
 
@@ -170,7 +198,10 @@ class _TextExtractor(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in _INVISIBLE_TAGS:
-            self._suppress_depth += 1
+            # Одиночный тег закрывать нечем — область подавления не открываем,
+            # иначе весь текст после него пропадёт.
+            if tag not in _VOID_INVISIBLE_TAGS:
+                self._suppress_depth += 1
             return
         if self._suppress_depth:
             return
@@ -189,9 +220,18 @@ class _TextExtractor(HTMLParser):
         elif tag in _LINE_BREAK_TAGS:
             self._parts.append("\n")
 
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # ``<meta/>`` и подобное: открывать и закрывать область нечего, а
+        # базовая реализация позвала бы handle_starttag и оставила счётчик
+        # поднятым навсегда.
+        if tag in _INVISIBLE_TAGS:
+            return
+        super().handle_startendtag(tag, attrs)
+
     def handle_endtag(self, tag: str) -> None:
         if tag in _INVISIBLE_TAGS:
-            self._suppress_depth = max(0, self._suppress_depth - 1)
+            if tag not in _VOID_INVISIBLE_TAGS:
+                self._suppress_depth = max(0, self._suppress_depth - 1)
             return
         if self._suppress_depth:
             return

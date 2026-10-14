@@ -619,7 +619,12 @@ def test_create_campaign_send_now(client, monkeypatch):
     calls = []
     import cbmail.workers.tasks as tasks
 
-    monkeypatch.setattr(tasks.send_campaign_task, "delay", lambda *a, **k: calls.append((a, k)))
+    # apply_async, а не delay: обработчик зовёт её напрямую, чтобы передать
+    # retry=False — при недоступной очереди повторы означают минуту ожидания
+    # в запросе человека.
+    monkeypatch.setattr(
+        tasks.send_campaign_task, "apply_async", lambda *a, **k: calls.append((a, k))
+    )
     _login(client)
     token = _csrf(client, "/campaigns/new")
     resp = client.post(
@@ -805,13 +810,18 @@ def test_campaign_rejects_foreign_mailbox(client):
     assert "checked" not in edit.text.split("smtp_ids")[1][:400], "чужой ящик не отмечен"
 
 
-def test_send_now_queues_instead_of_staying_draft(client):
+def test_send_now_queues_instead_of_staying_draft(client, monkeypatch):
     """Запущенная рассылка сразу уходит из черновиков.
 
     Одновременно отправляются не все кампании: лишние ждут очереди, и ожидание
     может длиться часами. Пока статус оставался «Черновик», рассылка выглядела
     незапустившейся — её запускали повторно и заводили вторую такую же.
     """
+    import cbmail.workers.tasks as tasks
+
+    # Очередь здесь ни при чём: проверяется статус кампании, а не доставка
+    # задачи. Без подмены тест зависел бы от поднятого Redis.
+    monkeypatch.setattr(tasks.send_campaign_task, "apply_async", lambda *a, **k: None)
     _login(client)
     _add_mailbox(client, "Ящик", "box@example.com")
     token = _csrf(client, "/campaigns/new")
@@ -842,3 +852,36 @@ def test_send_now_queues_instead_of_staying_draft(client):
     detail = client.get(location).text
     assert "Черновик" not in detail, "ожидающая очереди рассылка не должна числиться черновиком"
     assert "Запланирована" in detail or "Отправляется" in detail or "Отправлена" in detail
+
+
+def test_send_now_survives_broker_outage(client, monkeypatch):
+    """Недоступная очередь не превращается в отказ человеку.
+
+    Статус и время отправки уже записаны в базу, и кампанию подберёт тик
+    расписания, как только очередь поднимется. Показывать ошибку значило бы
+    предложить нажать ещё раз — хотя нажимать нечего, рассылка уже в очереди.
+    """
+    import cbmail.workers.tasks as tasks
+
+    def _broker_down(*a, **k):
+        raise ConnectionError("очередь недоступна")
+
+    monkeypatch.setattr(tasks.send_campaign_task, "apply_async", _broker_down)
+    _login(client)
+    token = _csrf(client, "/campaigns/new")
+    resp = client.post(
+        "/campaigns/",
+        data={
+            "csrfmiddlewaretoken": token,
+            "name": "Очередь лежит",
+            "subject": "Тема",
+            "message": "Текст",
+            "recipient_emails": "a@example.com",
+            "intent": "send_now",
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, "человек видит обычный переход, а не ошибку"
+    location = resp.headers["location"]
+    detail = client.get(location).text
+    assert "Черновик" not in detail, "кампания всё равно поставлена в очередь"

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -43,6 +44,8 @@ from cbmail.web.pagination import Page, offset, parse_page
 from cbmail.web.templating import render
 
 router = APIRouter(prefix="/campaigns")
+
+logger = logging.getLogger(__name__)
 
 _MAX_ATTACHMENTS = 3
 _PER_PAGE = 25
@@ -628,7 +631,23 @@ async def _enqueue(db: AsyncSession, campaign: Campaign) -> None:
 
     from cbmail.workers.tasks import send_campaign_task
 
-    send_campaign_task.delay(campaign.id, force=True)
+    try:
+        # retry=False: одна попытка вместо повторов с паузами. Повторы здесь —
+        # это минута ожидания в запросе человека ради того, что и так сделает
+        # тик расписания; при недоступной очереди он всё равно не поможет.
+        send_campaign_task.apply_async(
+            args=(campaign.id,), kwargs={"force": True}, retry=False
+        )
+    except Exception:  # недоступен брокер очереди
+        # Не ошибка для человека: кампания уже поставлена в очередь в базе, и
+        # время отправки у неё наступило — её подберёт тик расписания, как
+        # только очередь поднимется. Показывать отказ значило бы предложить
+        # нажать ещё раз, хотя нажимать нечего.
+        logger.warning(
+            "Кампания %s поставлена в очередь, но задача не отправлена — ждём тика расписания",
+            campaign.id,
+            exc_info=True,
+        )
 
 
 @router.post("/{campaign_id}/send", dependencies=[Depends(verify_csrf)])

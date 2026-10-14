@@ -21,4 +21,16 @@ for host, port in targets:
 PY
 echo "Зависимости готовы"
 
-exec celery -A cbmail.workers.celery_app:celery_app worker --beat -l info --concurrency=1
+# Сколько кампаний уходит одновременно.
+#
+# Было 1: вторая запущенная рассылка просто ждала в очереди, пока первая не
+# закончится — а это часы на большом списке. Со стороны человека она выглядела
+# незапустившейся, и её запускали повторно.
+#
+# Три — согласовано с числом ящиков на рассылку (MAX_PARALLEL_MAILBOXES): каждая
+# кампания держит до трёх соединений с базой плюс одно своё, то есть потолок
+# примерно двенадцать подключений на воркер. Поднимать это число нужно вместе с
+# размером пула в cbmail/db/session.py и max_connections у Postgres.
+CONCURRENCY="${CELERY_CONCURRENCY:-3}"
+
+exec celery -A cbmail.workers.celery_app:celery_app worker --beat -l info --concurrency="$CONCURRENCY"

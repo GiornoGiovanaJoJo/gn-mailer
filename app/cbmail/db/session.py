@@ -57,10 +57,13 @@ def get_sync_engine():
     return create_engine(
         settings.sync_database_url,
         echo=False,
-        # Воркер с concurrency=1 не нуждается в большом пуле, но соединение
-        # обязано переживать долгие паузы между письмами.
-        pool_size=5,
-        max_overflow=5,
+        # Пул на один процесс воркера. Кампания берёт одно соединение себе и по
+        # одному на каждый ящик, отправляющий параллельно (MAX_PARALLEL_MAILBOXES),
+        # то есть до четырёх. Запас сверх этого — на тик обслуживания, который
+        # идёт в том же процессе. Соединение обязано переживать долгие паузы
+        # между письмами, отсюда pre_ping и recycle.
+        pool_size=6,
+        max_overflow=4,
         pool_pre_ping=True,
         pool_recycle=1800,
     )

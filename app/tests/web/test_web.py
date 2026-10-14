@@ -803,3 +803,42 @@ def test_campaign_rejects_foreign_mailbox(client):
     campaign_id = int(resp.headers["location"].rsplit("/", 1)[-1])
     edit = client.get(f"/campaigns/{campaign_id}/edit")
     assert "checked" not in edit.text.split("smtp_ids")[1][:400], "чужой ящик не отмечен"
+
+
+def test_send_now_queues_instead_of_staying_draft(client):
+    """Запущенная рассылка сразу уходит из черновиков.
+
+    Одновременно отправляются не все кампании: лишние ждут очереди, и ожидание
+    может длиться часами. Пока статус оставался «Черновик», рассылка выглядела
+    незапустившейся — её запускали повторно и заводили вторую такую же.
+    """
+    _login(client)
+    _add_mailbox(client, "Ящик", "box@example.com")
+    token = _csrf(client, "/campaigns/new")
+    resp = client.post(
+        "/campaigns/",
+        data={
+            "csrfmiddlewaretoken": token,
+            "name": "В очередь",
+            "subject": "Тема",
+            "message": "Текст",
+            "recipient_emails": "a@example.com",
+            "intent": "draft",
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    location = resp.headers["location"]
+    campaign_id = int(location.rsplit("/", 1)[-1])
+    assert "Черновик" in client.get(location).text
+
+    token = _csrf(client, location)
+    started = client.post(
+        f"/campaigns/{campaign_id}/send",
+        data={"csrfmiddlewaretoken": token},
+        follow_redirects=False,
+    )
+    assert started.status_code == 303
+    detail = client.get(location).text
+    assert "Черновик" not in detail, "ожидающая очереди рассылка не должна числиться черновиком"
+    assert "Запланирована" in detail or "Отправляется" in detail or "Отправлена" in detail

@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -342,9 +342,8 @@ async def create_campaign(
         note += " " + " ".join(warnings)
 
     if intent == "send_now":
-        from cbmail.workers.tasks import send_campaign_task
-        send_campaign_task.delay(campaign.id, force=True)
-        note = "Кампания создана, отправка запущена — обновите страницу через минуту."
+        await _enqueue(db, campaign)
+        note = "Кампания создана и поставлена в очередь — обновите страницу через минуту."
     return redirect(f"/campaigns/{campaign.id}", ok=note)
 
 
@@ -610,6 +609,28 @@ async def delete_campaign(
     return redirect("/campaigns/", ok="Кампания удалена.")
 
 
+async def _enqueue(db: AsyncSession, campaign: Campaign) -> None:
+    """Поставить кампанию в очередь на отправку.
+
+    Статус меняем ЗДЕСЬ, не дожидаясь воркера. Одновременно работают не все
+    кампании сразу: лишние ждут своей очереди, и ожидание это может длиться
+    часами. Пока статус оставался «Черновик», человек видел рассылку, которая
+    «не запустилась», перезапускал её и заводил вторую такую же — а она просто
+    стояла в очереди.
+
+    Время отправки ставим текущее: если задача до воркера не доедет (перезапуск,
+    потерянное сообщение), кампанию подберёт обычный тик расписания. Повторного
+    запуска это не вызывает — захват кампании атомарный.
+    """
+    campaign.status = CampaignStatus.SCHEDULED.value
+    campaign.scheduled_time = datetime.now(timezone.utc)
+    await db.commit()
+
+    from cbmail.workers.tasks import send_campaign_task
+
+    send_campaign_task.delay(campaign.id, force=True)
+
+
 @router.post("/{campaign_id}/send", dependencies=[Depends(verify_csrf)])
 async def send_now(
     campaign_id: int,
@@ -622,10 +643,11 @@ async def send_now(
     if campaign.status in (CampaignStatus.SENDING.value, CampaignStatus.SENT.value):
         return redirect(f"/campaigns/{campaign_id}", err="Кампания уже отправляется или отправлена.")
 
-    from cbmail.workers.tasks import send_campaign_task
-
-    send_campaign_task.delay(campaign_id, force=True)
-    return redirect(f"/campaigns/{campaign_id}", ok="Отправка запущена — обновите страницу через минуту.")
+    await _enqueue(db, campaign)
+    return redirect(
+        f"/campaigns/{campaign_id}",
+        ok="Рассылка поставлена в очередь — обновите страницу через минуту.",
+    )
 
 
 # --- Вспомогательное ---------------------------------------------------------

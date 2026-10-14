@@ -30,14 +30,19 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import queue
+import threading
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from sqlalchemy import and_ as sa_and
 from sqlalchemy import func, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy import or_ as sa_or
+from sqlalchemy.orm import Session, sessionmaker
 
 from cbmail.core.config import get_settings
 from cbmail.db.models import (
@@ -83,6 +88,13 @@ MAX_RECONNECTS_PER_BATCH = 5
 # (соединение рвалось чаще, чем позволяет бюджет переподключений).
 RETRY_DELAY_MINUTES = 10
 
+# Сколько ящиков рассылки работают одновременно.
+#
+# Каждый держит своё соединение с базой и своё соединение с почтовым сервером, а
+# пул подключений конечен. Восемь покрывают любую реальную рассылку: дальше
+# упираются уже не в скорость отправки, а в суточные лимиты ящиков.
+MAX_PARALLEL_MAILBOXES = 8
+
 
 class CampaignNotSendable(Exception):
     """Кампанию нельзя отправлять — с человекочитаемой причиной."""
@@ -126,11 +138,17 @@ def send_campaign(
     result = SendResult(campaign_id=campaign_id)
 
     try:
-        # SMTP разрешаем первым: домен адреса «От кого» задаёт область отписки,
-        # по которой из получателей вычитаются отписавшиеся именно от этого
-        # отправителя. Так план учитывает адресные отписки, а не только глобальные.
-        credentials, from_email, profile = _resolve_smtp(session, campaign, now=now)
-        scope_domain = email_domain(from_email)
+        # Ящики разрешаем первыми: домен адреса «От кого» задаёт область
+        # отписки, по которой из получателей вычитаются отписавшиеся именно от
+        # этого отправителя. Так план учитывает адресные отписки, а не только
+        # глобальные.
+        #
+        # Ящиков может быть несколько, и домены у них разные. Тогда общий план
+        # строится только по глобальным отпискам, а свой домен каждый ящик
+        # отсеивает сам — вычесть объединение значило бы не отправить письмо
+        # тем, кто отписался лишь от одного из отправителей.
+        senders = _resolve_senders(session, campaign, now=now)
+        scope_domain = senders[0].scope_domain if len(senders) == 1 else ""
 
         plan = _build_plan(session, campaign, scope_domain=scope_domain)
         result.skipped_stoplist = plan.skipped_stoplist
@@ -158,20 +176,32 @@ def send_campaign(
             return result
 
         # Суточный лимит на ящик (напр. 1000/день). Считаем, сколько уже ушло с
-        # этого профиля сегодня, и обрезаем план до остатка. Если лимит исчерпан —
-        # переносим кампанию на начало следующих суток, не отправляя ничего.
+        # каждого профиля сегодня, и обрезаем план до суммы остатков. Если
+        # квота исчерпана у всех — переносим кампанию на начало следующих
+        # суток, не отправляя ничего.
         capped_by_limit = False
-        remaining_today = _remaining_today(session, profile, now=now)
-        if remaining_today is not None:
-            if remaining_today <= 0:
-                _defer_to_next_day(
-                    session, campaign, "Суточный лимит ящика исчерпан", now=now
-                )
-                result.deferred = True
-                return result
-            if len(plan.recipients) > remaining_today:
-                plan = replace(plan, recipients=plan.recipients[:remaining_today])
-                capped_by_limit = True
+        live = [s for s in senders if s.remaining_today is None or s.remaining_today > 0]
+        if not live:
+            _defer_to_next_day(
+                session,
+                campaign,
+                "Суточный лимит ящика исчерпан"
+                if len(senders) == 1
+                else f"Суточный лимит исчерпан у всех ящиков рассылки ({len(senders)})",
+                now=now,
+            )
+            result.deferred = True
+            return result
+        # Безлимитный ящик снимает ограничение со всей рассылки: остаток, который
+        # не возьмут остальные, уйдёт через него.
+        capacity = (
+            None
+            if any(s.remaining_today is None for s in live)
+            else sum(s.remaining_today or 0 for s in live)
+        )
+        if capacity is not None and len(plan.recipients) > capacity:
+            plan = replace(plan, recipients=plan.recipients[:capacity])
+            capped_by_limit = True
 
         # Тело письма собирается один раз на кампанию; для каждого получателя
         # выполняется только подстановка адреса.
@@ -183,27 +213,33 @@ def send_campaign(
         interval = clamp_interval(campaign.message_interval)
         batch_size = clamp_batch_size(campaign.message_count)
 
-        for batch in plan.batches(batch_size):
-            if _is_cancelled(session, campaign_id):
-                result.stopped_by_user = True
-                break
-            stopped = _send_batch(
-                session,
+        # Общая очередь адресов на все ящики: кто освободился, тот и берёт
+        # следующий. Порядок тот же, что в плане — батчи здесь не нужны, пауза
+        # между письмами соблюдается каждым ящиком отдельно.
+        pending: queue.Queue[str] = queue.Queue()
+        for email in plan.recipients:
+            pending.put(email)
+
+        _merge(
+            result,
+            _dispatch(
+                live,
+                session=session,
                 campaign_id=campaign_id,
-                recipients=batch,
-                credentials=credentials,
-                from_email=from_email,
+                pending=pending,
                 message=message,
                 attachments=attachments,
                 interval=interval,
-                result=result,
+                batch_size=batch_size,
                 sleep=sleep,
                 now=now,
-                scope_domain=scope_domain,
-            )
-            if stopped:
-                result.stopped_by_user = True
-                break
+            ),
+        )
+        # Остаток в очереди означает, что ящики выбыли раньше списка: кончились
+        # квоты либо рвалось соединение. Кампания не должна считаться
+        # отправленной — остаток дошлём следующим заходом.
+        if not pending.empty() and not result.stopped_by_user and not result.interrupted:
+            capped_by_limit = True
 
         if result.stopped_by_user:
             _finish(session, campaign, CampaignStatus.CANCELLED, now=now)
@@ -435,9 +471,19 @@ def _load_already_sent(session: Session, campaign_id: int) -> set[str]:
 
 
 def _resolve_smtp(
-    session: Session, campaign: Campaign, *, now: Callable[[], datetime]
+    session: Session,
+    campaign: Campaign,
+    profile: SmtpProfile | None = None,
+    *,
+    now: Callable[[], datetime],
 ) -> tuple[SmtpCredentials, str, SmtpProfile]:
-    profile = campaign.smtp
+    """Параметры отправки одним ящиком.
+
+    ``profile`` задан — используем его; иначе прежний порядок: ящик кампании,
+    а при его отсутствии первый ящик пользователя.
+    """
+    if profile is None:
+        profile = campaign.smtp
     if profile is None:
         profile = session.execute(
             select(SmtpProfile)
@@ -472,7 +518,16 @@ def _day_bounds(moment: datetime) -> tuple[datetime, datetime]:
 
 
 def _sent_today(session: Session, profile_id: int, *, now: Callable[[], datetime]) -> int:
-    """Сколько писем ушло с этого SMTP-профиля за текущие сутки (по логам)."""
+    """Сколько писем ушло с этого ящика за текущие сутки (по логам).
+
+    Ящик берём из самой записи лога. Через кампанию его определять больше
+    нельзя: рассылка идёт с нескольких ящиков сразу, и по кампании не понять,
+    чью квоту израсходовало конкретное письмо.
+
+    У записей, сделанных раньше, колонка пуста — для них ящик по-прежнему
+    определяется через кампанию. Иначе в день перехода суточные счётчики
+    обнулились бы и лимит провайдера был бы превышен.
+    """
     start, end = _day_bounds(now())
     return int(
         session.execute(
@@ -481,7 +536,13 @@ def _sent_today(session: Session, profile_id: int, *, now: Callable[[], datetime
             .join(Campaign, Campaign.id == CampaignLog.campaign_id)
             .where(
                 CampaignLog.status == LOG_SENT,
-                Campaign.use_smtp_settings_id == profile_id,
+                sa_or(
+                    CampaignLog.smtp_id == profile_id,
+                    sa_and(
+                        CampaignLog.smtp_id.is_(None),
+                        Campaign.use_smtp_settings_id == profile_id,
+                    ),
+                ),
                 CampaignLog.created_at >= start,
                 CampaignLog.created_at < end,
             )
@@ -620,31 +681,136 @@ def _guess_mime(filename: str) -> str:
 # --- Собственно отправка -----------------------------------------------------
 
 
-def _send_batch(
+@dataclass(slots=True)
+class _Sender:
+    """Один ящик на время рассылки: чем отправлять и сколько ему осталось.
+
+    Лимиты и отказы принадлежат ящику, а не рассылке. У одного кончается
+    суточная квота, у другого разваливается авторизация — остальные обязаны
+    продолжать. Поэтому всё, что относится к ящику, живёт здесь, а не в общих
+    переменных отправки.
+    """
+
+    profile: SmtpProfile
+    credentials: SmtpCredentials
+    from_email: str
+    scope_domain: str
+    #: Остаток суточной квоты; None — лимит не задан.
+    remaining_today: int | None
+    #: Адреса, отписавшиеся именно от этого отправителя. Пусто, когда ящик один:
+    #: тогда отписки уже вычтены из общего плана.
+    unsubscribed: frozenset[str] = frozenset()
+
+
+def _resolve_senders(
+    session: Session, campaign: Campaign, *, now: Callable[[], datetime]
+) -> list[_Sender]:
+    """Какими ящиками отправлять кампанию.
+
+    Выбранный набор — это ``CampaignSmtp``. Пусто означает прежнее поведение:
+    один ящик из ``use_smtp_settings_id`` либо первый ящик пользователя. Так
+    продолжают работать все созданные раньше рассылки, и трогать их не нужно.
+
+    Ненастроенный ящик пропускаем, а не валим всю рассылку: остальные должны
+    отправить то, что им досталось. Если не осталось ни одного — это уже отказ
+    с внятной причиной.
+    """
+    chosen = [link.smtp for link in campaign.smtp_profiles if link.smtp is not None]
+    if not chosen:
+        return [_build_sender(session, campaign, None, now=now)]
+
+    if len(chosen) > MAX_PARALLEL_MAILBOXES:
+        # Молча отбросить лишние нельзя: человек отметил ящики и ждёт, что они
+        # работают. Говорим вслух и берём первые — каждый поток держит своё
+        # соединение с базой, и пул конечен.
+        logger.warning(
+            "Кампания %s: выбрано ящиков %d, одновременно работают %d — остальные не участвуют",
+            campaign.id,
+            len(chosen),
+            MAX_PARALLEL_MAILBOXES,
+        )
+        chosen = chosen[:MAX_PARALLEL_MAILBOXES]
+
+    senders: list[_Sender] = []
+    broken: list[str] = []
+    for profile in chosen:
+        try:
+            senders.append(_build_sender(session, campaign, profile, now=now))
+        except CampaignNotSendable as exc:
+            broken.append(f"{profile.email_host_user or profile.title}: {exc}")
+
+    if not senders:
+        reason = "; ".join(broken) or "Не найдены настройки SMTP"
+        _abort(session, campaign, reason, now=now)
+        raise CampaignNotSendable(reason)
+
+    if broken:
+        logger.warning("Кампания %s: ящики пропущены — %s", campaign.id, "; ".join(broken))
+
+    # Отписка адресная: отписавшийся от писем одного отправителя продолжает
+    # получать от другого. Поэтому домен своего отправителя каждый ящик
+    # отсеивает сам — в общий план входят только глобальные отписки.
+    by_domain: dict[str, frozenset[str]] = {}
+    for sender in senders:
+        if sender.scope_domain not in by_domain:
+            by_domain[sender.scope_domain] = frozenset(
+                _load_unsubscribes(session, sender.scope_domain)
+            )
+        sender.unsubscribed = by_domain[sender.scope_domain]
+    return senders
+
+
+def _build_sender(
     session: Session,
+    campaign: Campaign,
+    profile: SmtpProfile | None,
     *,
+    now: Callable[[], datetime],
+) -> _Sender:
+    """Собрать параметры отправки по одному ящику."""
+    credentials, from_email, resolved = _resolve_smtp(session, campaign, profile, now=now)
+    return _Sender(
+        profile=resolved,
+        credentials=credentials,
+        from_email=from_email,
+        scope_domain=email_domain(from_email),
+        remaining_today=_remaining_today(session, resolved, now=now),
+    )
+
+
+def _run_sender(
+    sender: _Sender,
+    *,
+    session: Session,
     campaign_id: int,
-    recipients: tuple[str, ...],
-    credentials: SmtpCredentials,
-    from_email: str,
+    pending: queue.Queue[str],
+    cancelled: threading.Event,
     message: composer.ComposedMessage,
     attachments: list[Attachment],
     interval: int,
-    result: SendResult,
+    batch_size: int,
     sleep: Callable[[float], None],
     now: Callable[[], datetime],
-    scope_domain: str = "",
-) -> bool:
-    """Отправить пачку. Возвращает True, если пользователь нажал «Стоп».
+) -> SendResult:
+    """Отправка одним ящиком: берёт адреса из общей очереди, пока они есть.
+
+    Очередь общая на все ящики, и разбирают её по мере готовности, а не делят
+    заранее поровну: ящики работают с разной скоростью, у одного кончается
+    квота, другой может отвалиться совсем — заранее нарезанная доля в этих
+    случаях осталась бы неотправленной.
 
     При обрыве соединения (частый случай с mail.ru: «Connection unexpectedly
     closed») соединение переоткрывается, и отправка ПРОДОЛЖАЕТСЯ со следующего
     адреса — оборвавшийся помечается неудачным, но идущие за ним не теряются.
-    Раньше один такой адрес прекращал всю пачку, а кампания помечалась
-    «Отправлена», и получатели после него не получали письмо никогда.
     """
+    result = SendResult(campaign_id=campaign_id)
     base_url = _base_url()
     smtp = None  # текущая открытая SMTP-сессия (или None)
+    remaining = sender.remaining_today
+    # Сколько писем ушло в текущем соединении. Провайдеры ограничивают их число
+    # на одну сессию, поэтому соединение переоткрывается раз в пачку — раньше
+    # то же давало разбиение плана на батчи.
+    in_session = 0
 
     def _drop() -> None:
         # Закрыть соединение, проглотив любые ошибки закрытия мёртвого сокета.
@@ -662,14 +828,14 @@ def _send_batch(
             return True
         for attempt in range(MAX_RECONNECTS_PER_BATCH + 1):
             try:
-                cm = SmtpSession(credentials)
+                cm = SmtpSession(sender.credentials)
                 cm.__enter__()
                 smtp = cm
                 return True
             except SmtpError as exc:
                 logger.warning(
-                    "Кампания %s: не удалось открыть SMTP (%s), попытка %d/%d",
-                    campaign_id, exc, attempt + 1, MAX_RECONNECTS_PER_BATCH + 1,
+                    "Кампания %s, ящик %s: не удалось открыть SMTP (%s), попытка %d/%d",
+                    campaign_id, sender.from_email, exc, attempt + 1, MAX_RECONNECTS_PER_BATCH + 1,
                 )
                 result.errors.append(str(exc))
                 if attempt < MAX_RECONNECTS_PER_BATCH:
@@ -677,28 +843,58 @@ def _send_batch(
         return False
 
     try:
-        for email in recipients:
+        while True:
+            if cancelled.is_set():
+                result.stopped_by_user = True
+                return result
+            if remaining is not None and remaining <= 0:
+                # Квота ящика исчерпана: остаток разберут другие, а если их нет —
+                # кампания перенесётся на следующие сутки.
+                result.deferred = True
+                return result
+            try:
+                email = pending.get_nowait()
+            except queue.Empty:
+                return result
+
+            if email in sender.unsubscribed:
+                # Отписан именно от этого отправителя. Не возвращаем в очередь:
+                # письмо «от другого ящика той же компании» — не то, на что
+                # человек соглашался, отписываясь.
+                result.skipped_stoplist += 1
+                continue
+
             if _is_cancelled(session, campaign_id):
-                return True
+                cancelled.set()
+                result.stopped_by_user = True
+                return result
 
             # Интервал соблюдается ПЕРЕД каждым письмом, кроме первого за заход.
             # На время паузы соединение ЗАКРЫВАЕМ: почтовые серверы (Яндекс и др.)
             # рвут простаивающие сессии, и следующая отправка по «протухшему»
             # сокету падала бы «Connection unexpectedly closed». Перед письмом
             # открываем свежее соединение — протухать нечему.
-            if interval > 0 and (result.sent + result.failed) > 0:
+            if batch_size > 0 and in_session >= batch_size:
+                _drop()
+                in_session = 0
+
+            if interval > 0 and result.total_processed > 0:
                 _drop()
                 sleep(interval)
                 _heartbeat(session, campaign_id, now=now)
                 if _is_cancelled(session, campaign_id):
-                    return True
+                    cancelled.set()
+                    result.stopped_by_user = True
+                    return result
 
             if not _ensure_open():
                 # Сервер недоступен — необработанные адреса дошлём позже.
+                # Взятый из очереди адрес возвращаем: его разберёт другой ящик.
+                pending.put(email)
                 result.interrupted = True
-                return False
+                return result
 
-            unsub_url = composer.build_unsubscribe_url(base_url, email, scope=scope_domain)
+            unsub_url = composer.build_unsubscribe_url(base_url, email, scope=sender.scope_domain)
             personalized = message.personalize(email, unsub_url)
             # Пиксель открытия и переходы по ссылкам. Встраиваются после
             # подстановок: иначе адрес получателя в ссылке отписки не попал бы
@@ -715,7 +911,7 @@ def _send_batch(
                 subject=personalized.subject,
                 text_body=personalized.text_body,
                 html_body=html_body,
-                from_email=from_email,
+                from_email=sender.from_email,
                 attachments=attachments,
                 headers={
                     # Позволяет почтовым клиентам показать штатную кнопку
@@ -728,7 +924,7 @@ def _send_batch(
             try:
                 smtp.send(outgoing, email)
             except SmtpError as exc:
-                _log_failure(session, campaign_id, email, exc, now=now)
+                _log_failure(session, campaign_id, email, exc, now=now, smtp_id=sender.profile.id)
                 result.failed += 1
                 result.errors.append(f"{email}: {exc}")
                 # Соединение могло умереть на этом письме — сбрасываем, чтобы
@@ -736,11 +932,97 @@ def _send_batch(
                 if _is_fatal(exc):
                     _drop()
             else:
-                _log_success(session, campaign_id, email, now=now)
+                _log_success(session, campaign_id, email, now=now, smtp_id=sender.profile.id)
                 result.sent += 1
+                if remaining is not None:
+                    remaining -= 1
+            in_session += 1
     finally:
         _drop()
-    return False
+
+
+def _dispatch(
+    senders: list[_Sender],
+    *,
+    session: Session,
+    campaign_id: int,
+    pending: queue.Queue[str],
+    message: composer.ComposedMessage,
+    attachments: list[Attachment],
+    interval: int,
+    batch_size: int,
+    sleep: Callable[[float], None],
+    now: Callable[[], datetime],
+) -> list[SendResult]:
+    """Запустить ящики. Один — в текущем потоке, несколько — параллельно.
+
+    Один ящик намеренно обходится без потоков и без второй сессии: это прежний
+    путь целиком, и он не должен меняться из-за появления многопоточности.
+
+    Каждому потоку — своя сессия БД. Сессия SQLAlchemy не рассчитана на работу
+    из нескольких потоков: общая давала бы повреждение состояния, которое
+    проявляется не отказом, а неверными данными.
+    """
+    cancelled = threading.Event()
+    if len(senders) == 1:
+        return [
+            _run_sender(
+                senders[0],
+                session=session,
+                campaign_id=campaign_id,
+                pending=pending,
+                cancelled=cancelled,
+                message=message,
+                attachments=attachments,
+                interval=interval,
+                batch_size=batch_size,
+                sleep=sleep,
+                now=now,
+            )
+        ]
+
+    # Фабрику берём от движка вызывающей сессии, а не из глобальной: так потоки
+    # гарантированно работают с той же базой и тем же пулом, что и кампания —
+    # глобальная завела бы второе подключение мимо вызывающего кода.
+    factory = sessionmaker(bind=session.get_bind(), expire_on_commit=False, autoflush=False)
+
+    def _work(sender: _Sender) -> SendResult:
+        with factory() as own:
+            try:
+                return _run_sender(
+                    sender,
+                    session=own,
+                    campaign_id=campaign_id,
+                    pending=pending,
+                    cancelled=cancelled,
+                    message=message,
+                    attachments=attachments,
+                    interval=interval,
+                    batch_size=batch_size,
+                    sleep=sleep,
+                    now=now,
+                )
+            except Exception as exc:
+                own.rollback()
+                logger.exception("Кампания %s, ящик %s: поток упал", campaign_id, sender.from_email)
+                failed = SendResult(campaign_id=campaign_id)
+                failed.interrupted = True
+                failed.errors.append(f"{sender.from_email}: {exc}")
+                return failed
+
+    with ThreadPoolExecutor(max_workers=len(senders)) as pool:
+        return list(pool.map(_work, senders))
+
+
+def _merge(result: SendResult, parts: list[SendResult]) -> None:
+    """Свести итоги ящиков в общий результат кампании."""
+    for part in parts:
+        result.sent += part.sent
+        result.failed += part.failed
+        result.skipped_stoplist += part.skipped_stoplist
+        result.errors.extend(part.errors)
+        result.stopped_by_user = result.stopped_by_user or part.stopped_by_user
+        result.interrupted = result.interrupted or part.interrupted
 
 
 def _is_fatal(exc: SmtpError) -> bool:
@@ -750,9 +1032,18 @@ def _is_fatal(exc: SmtpError) -> bool:
 
 
 def _log_success(
-    session: Session, campaign_id: int, email: str, *, now: Callable[[], datetime]
+    session: Session,
+    campaign_id: int,
+    email: str,
+    *,
+    now: Callable[[], datetime],
+    smtp_id: int | None = None,
 ) -> None:
-    session.add(CampaignLog(campaign_id=campaign_id, email=email, status=LOG_SENT))
+    # Ящик записываем в сам лог: суточный лимит принадлежит ящику, а рассылка
+    # идёт с нескольких сразу — по кампании чужую квоту уже не отличить.
+    session.add(
+        CampaignLog(campaign_id=campaign_id, email=email, status=LOG_SENT, smtp_id=smtp_id)
+    )
     session.execute(
         update(Campaign)
         .where(Campaign.id == campaign_id)
@@ -764,7 +1055,13 @@ def _log_success(
 
 
 def _log_failure(
-    session: Session, campaign_id: int, email: str, exc: Exception, *, now: Callable[[], datetime]
+    session: Session,
+    campaign_id: int,
+    email: str,
+    exc: Exception,
+    *,
+    now: Callable[[], datetime],
+    smtp_id: int | None = None,
 ) -> None:
     session.add(
         CampaignLog(
@@ -772,6 +1069,7 @@ def _log_failure(
             email=email,
             status=LOG_FAILED,
             error_message=str(exc)[:2000],
+            smtp_id=smtp_id,
         )
     )
     session.execute(

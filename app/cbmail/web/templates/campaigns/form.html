@@ -85,6 +85,18 @@
               {% for p in profiles %}<option value="{{ p.id }}" data-project="{{ p.project_id or '' }}" {% if c and c.use_smtp_settings_id == p.id %}selected{% endif %}>{% if p.project %}[{{ p.project.name }}] {% endif %}{{ p.label }}{% if p.daily_limit %} · лимит {{ p.daily_limit }}/день{% endif %}</option>{% endfor %}
             </select>
             <div class="form-text">Ящики настраиваются в разделе «Настройки».</div></div>
+          <div class="col-md-8"><label class="form-label">Отправлять с нескольких ящиков одновременно <span class="text-body-secondary">(по желанию)</span></label>
+            <div class="border rounded p-2" style="max-height:180px;overflow-y:auto">
+              {% for p in profiles %}
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" name="smtp_ids" value="{{ p.id }}" id="c_smtp_multi_{{ p.id }}"{% if p.id in selected_smtp_ids %} checked{% endif %}>
+                <label class="form-check-label" for="c_smtp_multi_{{ p.id }}">{{ p.label }}{% if p.daily_limit %} · лимит {{ p.daily_limit }}/день{% endif %}</label>
+              </div>
+              {% else %}
+              <div class="text-body-secondary small">Ящиков пока нет.</div>
+              {% endfor %}
+            </div>
+            <div class="form-text">Отметьте несколько — список разойдётся между ними, и письма пойдут одновременно: рассылка уходит во столько же раз быстрее. Пауза между письмами и суточный лимит считаются у каждого ящика свои. Ничего не отмечено — работает выбор слева.</div></div>
           <div class="col-md-4"><label class="form-label" for="c_from_name">Имя отправителя <span class="text-body-secondary">(по желанию)</span></label><input type="text" id="c_from_name" name="from_name" class="form-control" value="{{ c.from_name if c and c.from_name else '' }}" placeholder="Например: Магазин «Ромашка»" autocomplete="off"></div>
           <div class="col-md-4"><label class="form-label" for="c_from_email">Адрес отправителя <span class="text-body-secondary">(по желанию)</span></label><input type="text" id="c_from_email" name="from_email" class="form-control" value="{{ c.from_email if c and c.from_email else '' }}" autocomplete="off"></div>
           <div class="col-md-4"><label class="form-label" for="c_count">Сколько писем за раз</label><input type="number" id="c_count" name="message_count" class="form-control" value="{{ c.message_count if c else 50 }}" min="1" max="1000">

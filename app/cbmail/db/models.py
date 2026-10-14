@@ -379,6 +379,12 @@ class Campaign(Base):
     attachments: Mapped[list[CampaignFile]] = relationship(
         back_populates="campaign", cascade="all, delete-orphan", lazy="selectin"
     )
+    #: Ящики, с которых уходит рассылка — они шлют одновременно, каждый свою
+    #: долю списка. Пусто — работает ``use_smtp_settings_id``, то есть один
+    #: ящик, как было раньше.
+    smtp_profiles: Mapped[list[CampaignSmtp]] = relationship(
+        back_populates="campaign", cascade="all, delete-orphan", lazy="selectin"
+    )
 
     @property
     def progress_percent(self) -> float:
@@ -386,6 +392,39 @@ class Campaign(Base):
             return 0.0
         processed = self.sent_count + self.failed_count
         return min(100.0, round(processed / self.total_recipients * 100, 1))
+
+
+class CampaignSmtp(Base):
+    """Ящик, участвующий в рассылке (``cbmail_campaign_smtp``).
+
+    Одна рассылка — несколько ящиков, отправляющих ОДНОВРЕМЕННО, каждый свою
+    долю списка. Тысяча писем уходит не за час с одного ящика, а за двенадцать
+    минут с пяти, и ни один не упирается в суточный лимит провайдера.
+
+    Отдельная таблица, а не список идентификаторов в поле кампании: ящик
+    удаляют, и связь обязана уйти вместе с ним. Список оставил бы ссылку на
+    несуществующий профиль, о которой отправка узнала бы в момент запуска.
+
+    Таблица аддитивная (префикс ``cbmail_``), Django-схему не трогает — как
+    ``cbmail_session`` и ``cbmail_unsubscribe``.
+    """
+
+    __tablename__ = "cbmail_campaign_smtp"
+
+    id: Mapped[int] = mapped_column(BIG_INT, primary_key=True, autoincrement=True)
+    campaign_id: Mapped[int] = mapped_column(
+        BIG_INT, ForeignKey("mail_massmailcampaign.id", ondelete="CASCADE")
+    )
+    smtp_id: Mapped[int] = mapped_column(
+        BIG_INT, ForeignKey("mail_usersettingssmtp.id", ondelete="CASCADE")
+    )
+
+    campaign: Mapped[Campaign] = relationship(back_populates="smtp_profiles")
+    smtp: Mapped[SmtpProfile] = relationship(lazy="joined")
+
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "smtp_id", name="cbmail_campaign_smtp_uniq"),
+    )
 
 
 class CampaignFile(Base):
@@ -422,6 +461,13 @@ class CampaignLog(Base):
     )
     email: Mapped[str] = mapped_column(String(254))
     status: Mapped[str] = mapped_column(String(50))
+    #: Ящик, которым письмо отправлено.
+    #:
+    #: Раньше ящик определялся через кампанию, и этого хватало: он был один.
+    #: Когда рассылка идёт с пяти ящиков сразу, по кампании уже не понять, чья
+    #: суточная квота израсходована, — а лимит провайдера именно на ящик, и
+    #: превышение стоит не ошибки на письме, а блокировки ящика целиком.
+    smtp_id: Mapped[int | None] = mapped_column(BIG_INT)
     error_message: Mapped[str | None] = mapped_column(Text)
     opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     clicked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

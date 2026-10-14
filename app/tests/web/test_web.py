@@ -722,3 +722,84 @@ def test_create_campaign_template_plus_extra_text(client):
     assert "Оформление промо" in edit
     # Текст пользователя — выше оформления шаблона.
     assert edit.index("Личное обращение к клиенту") < edit.index("Оформление промо")
+
+
+def _add_mailbox(client, title: str, address: str) -> None:
+    token = _csrf(client, "/smtp/")
+    client.post(
+        "/smtp/",
+        data={
+            "csrfmiddlewaretoken": token,
+            "title": title,
+            "email_host": "smtp.example.com",
+            "email_port": "465",
+            "email_host_user": address,
+            "email_host_password": "secret",
+            "default_from_email": address,
+            "email_use_ssl": "1",
+        },
+        follow_redirects=False,
+    )
+
+
+def test_campaign_keeps_chosen_mailboxes(client):
+    """Отмеченные ящики сохраняются и показываются отмеченными при правке.
+
+    Набор ящиков — то, ради чего рассылка идёт в несколько потоков. Если он
+    теряется при сохранении, человек видит форму, где всё выбрано, а письма
+    уходят одним ящиком, и разницу замечает только по времени отправки.
+    """
+    _login(client)
+    _add_mailbox(client, "Первый", "one@example.com")
+    _add_mailbox(client, "Второй", "two@example.com")
+
+    form = client.get("/campaigns/new")
+    assert "Отправлять с нескольких ящиков одновременно" in form.text
+    ids = re.findall(r'name="smtp_ids" value="(\d+)"', form.text)
+    assert len(ids) == 2, f"в форме должны быть оба ящика, найдено: {ids}"
+
+    token = _csrf(client, "/campaigns/new")
+    resp = client.post(
+        "/campaigns/",
+        data={
+            "csrfmiddlewaretoken": token,
+            "name": "Две почты",
+            "subject": "Тема",
+            "message": "Текст",
+            "recipient_emails": "a@example.com",
+            "smtp_ids": ids,
+            "intent": "draft",
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    campaign_id = int(resp.headers["location"].rsplit("/", 1)[-1])
+
+    edit = client.get(f"/campaigns/{campaign_id}/edit")
+    checked = re.findall(r'name="smtp_ids" value="(\d+)" id="[^"]*" checked', edit.text)
+    assert sorted(checked) == sorted(ids), "оба ящика остались отмеченными"
+
+
+def test_campaign_rejects_foreign_mailbox(client):
+    """Чужой ящик из формы не принимается: иначе с него можно было бы слать."""
+    _login(client)
+    _add_mailbox(client, "Свой", "mine@example.com")
+    token = _csrf(client, "/campaigns/new")
+    resp = client.post(
+        "/campaigns/",
+        data={
+            "csrfmiddlewaretoken": token,
+            "name": "Подмена",
+            "subject": "Тема",
+            "message": "Текст",
+            "recipient_emails": "a@example.com",
+            # Идентификатора, которого у пользователя нет.
+            "smtp_ids": ["999999"],
+            "intent": "draft",
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    campaign_id = int(resp.headers["location"].rsplit("/", 1)[-1])
+    edit = client.get(f"/campaigns/{campaign_id}/edit")
+    assert "checked" not in edit.text.split("smtp_ids")[1][:400], "чужой ящик не отмечен"

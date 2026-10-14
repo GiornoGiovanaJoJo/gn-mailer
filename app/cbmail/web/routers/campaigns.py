@@ -22,6 +22,7 @@ from cbmail.db.models import (
     Campaign,
     CampaignFile,
     CampaignLog,
+    CampaignSmtp,
     MailProject,
     MessageTemplate,
     Profile,
@@ -198,11 +199,52 @@ async def new_campaign(
         {
             "campaign": None,
             "profiles": profiles,
+            "selected_smtp_ids": [],
             "projects": await _user_projects(db, user),
             "templates": await _templates(db),
             "action": "/campaigns/",
         },
     )
+
+
+def _wanted_mailboxes(raw: list[str], profiles: list[SmtpProfile]) -> list[int]:
+    """Отмеченные ящики, оставляя только принадлежащие этому пользователю.
+
+    Чужой идентификатор в форме иначе позволил бы отправлять с чужой почты:
+    форму шлёт браузер, и значения в ней — то, что прислали, а не то, что
+    показали.
+    """
+    own = {p.id for p in profiles}
+    seen: set[int] = set()
+    result: list[int] = []
+    for value in raw:
+        parsed = _int_or_none(value)
+        if parsed is None or parsed not in own or parsed in seen:
+            continue
+        seen.add(parsed)
+        result.append(parsed)
+    return result
+
+
+async def _set_mailboxes(db: AsyncSession, campaign: Campaign, ids: list[int]) -> None:
+    """Перезаписать набор ящиков кампании.
+
+    Именно перезаписать: набор пришёл из формы, где человек видел его целиком.
+    Дописывать к сохранённому значило бы, что снять галочку невозможно.
+    """
+    await db.execute(delete(CampaignSmtp).where(CampaignSmtp.campaign_id == campaign.id))
+    for smtp_id in ids:
+        db.add(CampaignSmtp(campaign_id=campaign.id, smtp_id=smtp_id))
+
+
+async def _selected_mailboxes(db: AsyncSession, campaign: Campaign | None) -> list[int]:
+    """Какие ящики отмечены у кампании — для отрисовки формы."""
+    if campaign is None or not getattr(campaign, "id", None):
+        return []
+    rows = await db.execute(
+        select(CampaignSmtp.smtp_id).where(CampaignSmtp.campaign_id == campaign.id)
+    )
+    return list(rows.scalars())
 
 
 @router.post("/", dependencies=[Depends(verify_csrf)])
@@ -217,6 +259,9 @@ async def create_campaign(
     recipient_emails: str = Form(""),
     stop_list: str = Form(""),
     use_smtp_settings_id: str = Form(""),
+    # Несколько ящиков на одну рассылку: они шлют одновременно, каждый свою
+    # долю списка. Пусто — прежнее поведение с одним ящиком.
+    smtp_ids: list[str] = Form(default=[]),
     message_count: str = Form("50"),
     message_interval: str = Form("2"),
     from_email: str = Form(""),
@@ -253,6 +298,7 @@ async def create_campaign(
             {
                 "campaign": draft,
                 "profiles": profiles,
+                "selected_smtp_ids": _wanted_mailboxes(smtp_ids, profiles),
                 "templates": await _templates(db),
                 "action": "/campaigns/",
                 "error": error,
@@ -280,6 +326,9 @@ async def create_campaign(
     db.add(campaign)
     await db.commit()
     await db.refresh(campaign)
+
+    await _set_mailboxes(db, campaign, _wanted_mailboxes(smtp_ids, await _user_profiles(db, user)))
+    await db.commit()
 
     _, warnings = await _save_attachments(db, campaign, attachments, existing=0)
     await db.commit()
@@ -373,6 +422,7 @@ async def edit_campaign(
         {
             "campaign": campaign,
             "profiles": profiles,
+            "selected_smtp_ids": await _selected_mailboxes(db, campaign),
             "projects": await _user_projects(db, user),
             "templates": await _templates(db),
             "action": f"/campaigns/{campaign_id}/edit",
@@ -393,6 +443,9 @@ async def update_campaign(
     recipient_emails: str = Form(""),
     stop_list: str = Form(""),
     use_smtp_settings_id: str = Form(""),
+    # Несколько ящиков на одну рассылку: они шлют одновременно, каждый свою
+    # долю списка. Пусто — прежнее поведение с одним ящиком.
+    smtp_ids: list[str] = Form(default=[]),
     message_count: str = Form("50"),
     message_interval: str = Form("2"),
     from_email: str = Form(""),
@@ -426,6 +479,7 @@ async def update_campaign(
             {
                 "campaign": campaign,
                 "profiles": profiles,
+                "selected_smtp_ids": _wanted_mailboxes(smtp_ids, profiles),
                 "templates": await _templates(db),
                 "action": f"/campaigns/{campaign_id}/edit",
                 "error": error,
@@ -439,6 +493,7 @@ async def update_campaign(
     campaign.recipient_emails = join_emails(valid)
     campaign.stop_list = join_emails(parse_emails(stop_list))
     campaign.use_smtp_settings_id = _int_or_none(use_smtp_settings_id)
+    await _set_mailboxes(db, campaign, _wanted_mailboxes(smtp_ids, await _user_profiles(db, user)))
     campaign.message_count = clamp_batch_size(message_count)
     campaign.message_interval = clamp_interval(message_interval)
     campaign.from_email = from_email.strip() or None

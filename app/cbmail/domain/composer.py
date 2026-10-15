@@ -17,9 +17,9 @@ from html import unescape
 from html.parser import HTMLParser
 
 from cbmail.domain.html_document import (
+    cap_images,
     ensure_email_document,
     insert_into_body,
-    relax_fixed_widths,
 )
 
 # Плейсхолдер, который пользователь ставит в тело письма руками — обычно внутри
@@ -129,7 +129,7 @@ def _wrap_html(
     Заодно письмо приводится к годному для почты виду: жёсткие ширины из старой
     вёрстки становятся потолком, а в ``<head>`` появляются charset и viewport.
     """
-    document = ensure_email_document(relax_fixed_widths(body))
+    document = ensure_email_document(cap_images(body))
     before = f"<div>{_escape_to_html(header)}</div>" if header and header.strip() else ""
     tail: list[str] = []
     if footer and footer.strip():

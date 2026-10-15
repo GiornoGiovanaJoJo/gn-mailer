@@ -1,32 +1,46 @@
 """Подготовка HTML письма к отправке.
 
-Здесь решаются две вещи, из-за которых вёрстка «разъезжалась» у получателя.
+Правило здесь одно, и оно важнее всех удобств: **вёрстку письма не трогаем**.
+Письмо свёрстано таблицами с фиксированными ширинами, и это не устаревший
+приём, а единственный способ получить одинаковую картинку в десятке почтовых
+клиентов. Любая попытка «сделать его отзывчивым» на лету ломает ровно то, что
+автор шаблона собирал руками.
 
-Первая — фиксированные ширины. Шаблоны, сделанные под прежние рассыльщики,
-свёрстаны таблицами с ``width="900"``: там письмо отдавалось во всю ширину
-окна, и это сходило с рук. Современная вёрстка писем кладёт содержимое в
-колонку ~600 px, и таблица с жёсткой шириной растягивает собой всё письмо — у
-получателя появляется горизонтальная прокрутка, а текст обрезается по краям.
-Ширины больше ширины письма превращаются в потолок: ``max-width`` вместо
-``width``. На широком экране письмо выглядит ровно как раньше, на узком —
-сжимается вместо того, чтобы уехать вбок.
+Чему здесь научил опыт — тому, что именно ломается:
 
-Вторая — место для шапки, подвала и ссылки отписки. Редактор отдаёт
-законченный документ с ``<html>``, а они приклеивались снаружи: часть письма
-оказывалась после ``</html>``. Строгие почтовые клиенты такое выбрасывают — и
-вместе с подвалом пропадала ссылка «Отписаться», ради которой всё и
-задумывалось. Теперь всё кладётся внутрь ``<body>``.
+* ``<meta name="viewport" content="width=device-width">`` переключает мобильный
+  клиент из режима «нарисовать как на десктопе и уменьшить» в режим «рисовать
+  по ширине телефона». Для шаблона без медиазапросов это катастрофа: таблица на
+  600 px начинает ужиматься колонками. Поэтому viewport добавляется ТОЛЬКО
+  шаблонам, где медиазапросы есть, то есть автор сам предусмотрел узкий экран.
+* ``table{max-width:100%}`` ужимает фиксированную таблицу, у которой ширина
+  выставлена осознанно.
+* ``td,th{word-break:break-word}`` разрешает рвать слова в любом месте. У
+  колонки появляется минимальная ширина в один символ, и меню «о компании ·
+  каталог · новости» превращается в три столбика букв по вертикали.
+* ``width:100%`` рядом с ``max-width`` растягивает таблицу на всю ширину окна:
+  на широком экране текст расползается и наезжает на картинки.
 
-Разбор регулярными выражениями, а не парсером: трогаем только атрибуты ширины
-в открывающих тегах, и полноценное дерево ради этого тянуть незачем.
-Неизвестную разметку функции оставляют как есть.
+Остаётся то, что раскладку не меняет:
+
+* кодировка — без неё кириллица превращается в кракозябры;
+* потолок для картинок: изображение в 2000 px распирает письмо независимо от
+  вёрстки, а ``max-width:100%`` всего лишь не даёт ему вылезти за свою ячейку;
+* место для шапки, подвала и ссылки отписки ВНУТРИ ``<body>``. Редактор отдаёт
+  законченный документ с ``<html>``, а они приклеивались снаружи: часть письма
+  оказывалась после ``</html>``. Строгие клиенты такое выбрасывают — и вместе с
+  подвалом пропадала ссылка «Отписаться», ради которой всё задумывалось.
+
+Разбор регулярными выражениями, а не парсером: трогаем только теги картинок и
+границы документа, и полноценное дерево ради этого тянуть незачем. Неизвестную
+разметку функции оставляют как есть.
 """
 
 from __future__ import annotations
 
 import re
 
-# Ширина колонки письма. Всё, что шире, — подозрительно.
+# Ширина колонки письма — для вызывающего кода, который считает раскладку.
 EMAIL_WIDTH = 600
 
 _DOCUMENT_RE = re.compile(r"<html[\s>]", re.IGNORECASE)
@@ -34,18 +48,29 @@ _HEAD_RE = re.compile(r"<head\b[^>]*>", re.IGNORECASE)
 _BODY_OPEN_RE = re.compile(r"<body\b[^>]*>", re.IGNORECASE)
 _BODY_CLOSE_RE = re.compile(r"</body\s*>", re.IGNORECASE)
 _CHARSET_RE = re.compile(r"<meta[^>]+charset", re.IGNORECASE)
+_VIEWPORT_RE = re.compile(r"<meta[^>]+viewport", re.IGNORECASE)
 
-_TABLE_TAG_RE = re.compile(r"<(?:table|td|th)\b[^>]*>", re.IGNORECASE)
 _IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
-_WIDTH_ATTR_RE = re.compile(r"\swidth\s*=\s*[\"']?(\d+)(?:px)?[\"']?", re.IGNORECASE)
 _STYLE_ATTR_RE = re.compile(r"\sstyle\s*=\s*([\"'])(.*?)\1", re.IGNORECASE | re.DOTALL)
-_CSS_WIDTH_RE = re.compile(r"(^|;)(\s*)width\s*:\s*(\d+)px", re.IGNORECASE)
 _TAG_END_RE = re.compile(r"\s*(/?)>$")
+# Медиазапрос в шаблоне означает, что автор сам предусмотрел узкий экран.
+_MEDIA_QUERY_RE = re.compile(r"@media\b", re.IGNORECASE)
 
 
 def is_full_document(html: str) -> bool:
     """Есть ли в строке полноценный документ, а не фрагмент разметки."""
     return bool(_DOCUMENT_RE.search(html or ""))
+
+
+def is_responsive(html: str) -> bool:
+    """Рассчитан ли шаблон на узкий экран — есть ли в нём медиазапросы.
+
+    От этого зависит единственное: добавлять ли viewport. Шаблону с
+    медиазапросами он нужен — без него они не сработают. Шаблону без них он
+    противопоказан: мобильный клиент перестанет уменьшать письмо целиком и
+    начнёт ломать таблицы по колонкам.
+    """
+    return bool(_MEDIA_QUERY_RE.search(html or ""))
 
 
 def _with_style(tag_source: str, extra: str) -> str:
@@ -65,66 +90,42 @@ def _with_style(tag_source: str, extra: str) -> str:
     return _TAG_END_RE.sub(lambda m: f' style="{extra}"{m.group(1)}>', tag_source)
 
 
-def relax_fixed_widths(html: str, limit: int = EMAIL_WIDTH) -> str:
-    """Перевести жёсткие ширины в потолок.
+def cap_images(html: str) -> str:
+    """Не дать картинке вылезти за свою ячейку.
 
-    Трогаем только значения больше ширины письма: таблица на 600 px и уже — это
-    осознанная вёрстка, и менять её нельзя. Проценты не трогаем вовсе:
-    ``width="100%"`` и так тянется по месту.
+    Единственное вмешательство в разметку, которое себя оправдывает: картинку в
+    письмо вставляют как есть, прямо из файла, и снимок на 2000 px распирает
+    письмо независимо от того, как оно свёрстано. Атрибут ширины сохраняем — на
+    него опирается Outlook, который ``max-width`` не понимает.
     """
     if not html:
         return html
 
-    def fix_table(match: re.Match[str]) -> str:
-        tag = match.group(0)
-        width = _WIDTH_ATTR_RE.search(tag)
-        if not width:
-            return tag
-        value = int(width.group(1))
-        if value <= limit:
-            return tag
-        without_width = tag[: width.start()] + tag[width.end() :]
-        return _with_style(without_width, f"max-width:{value}px;width:100%")
-
-    out = _TABLE_TAG_RE.sub(fix_table, html)
-
-    def fix_style(match: re.Match[str]) -> str:
-        quote, css = match.group(1), match.group(2)
-
-        def fix_css(inner: re.Match[str]) -> str:
-            value = int(inner.group(3))
-            if value <= limit:
-                return inner.group(0)
-            return f"{inner.group(1)}{inner.group(2)}max-width:{value}px;width:100%"
-
-        fixed = _CSS_WIDTH_RE.sub(fix_css, css)
-        return match.group(0) if fixed == css else f" style={quote}{fixed}{quote}"
-
-    out = _STYLE_ATTR_RE.sub(fix_style, out)
-
     def fix_img(match: re.Match[str]) -> str:
         tag = match.group(0)
-        # Атрибут ширины оставляем — на него опирается Outlook, — но добавляем
-        # потолок, иначе широкая картинка тянет письмо так же, как таблица.
         if "max-width" in tag.lower():
             return tag
         return _with_style(tag, "max-width:100%;height:auto")
 
-    return _IMG_TAG_RE.sub(fix_img, out)
+    return _IMG_TAG_RE.sub(fix_img, html)
 
 
-# Содержимое <head>, без которого письмо плохо себя ведёт у получателя.
-#
-# Редактор отдаёт пустой <head>, и это заметно на телефоне: без viewport
-# почтовый клиент показывает письмо в ширине рабочего стола и мельчит шрифт так,
-# что читать нельзя. Стили — страховка на случай вёрстки, которую не удалось
-# распознать: клиенты, понимающие <style>, не дадут ей уехать вбок.
-_HEAD_EXTRAS = (
+# Кодировка и сброс полей — то, что не меняет раскладку.
+_HEAD_BASE = (
     '<meta charset="utf-8">'
-    '<meta name="viewport" content="width=device-width,initial-scale=1">'
-    "<style>img{max-width:100%;height:auto}table{max-width:100%}"
-    "td,th{word-break:break-word}body{margin:0;padding:0;-webkit-text-size-adjust:100%}</style>"
+    "<style>img{max-width:100%;height:auto}"
+    "body{margin:0;padding:0;-webkit-text-size-adjust:100%}</style>"
 )
+
+# Viewport — только для шаблонов с медиазапросами (см. is_responsive).
+_HEAD_VIEWPORT = '<meta name="viewport" content="width=device-width,initial-scale=1">'
+
+
+def _head_extras(html: str) -> str:
+    extras = _HEAD_BASE
+    if is_responsive(html) and not _VIEWPORT_RE.search(html):
+        extras += _HEAD_VIEWPORT
+    return extras
 
 
 def ensure_email_document(html: str) -> str:
@@ -135,22 +136,23 @@ def ensure_email_document(html: str) -> str:
     """
     if not html:
         return html
+    extras = _head_extras(html)
     if not is_full_document(html):
-        return f"<!DOCTYPE html><html><head>{_HEAD_EXTRAS}</head><body>{html}</body></html>"
+        return f"<!DOCTYPE html><html><head>{extras}</head><body>{html}</body></html>"
     if _CHARSET_RE.search(html):
         return html
 
     head = _HEAD_RE.search(html)
     if head:
-        return html[: head.end()] + _HEAD_EXTRAS + html[head.end() :]
+        return html[: head.end()] + extras + html[head.end() :]
 
     body = _BODY_OPEN_RE.search(html)
     if body:
-        return html[: body.start()] + f"<head>{_HEAD_EXTRAS}</head>" + html[body.start() :]
+        return html[: body.start()] + f"<head>{extras}</head>" + html[body.start() :]
 
     opening = _DOCUMENT_RE.search(html)
     if opening:
-        return html[: opening.end()] + f"<head>{_HEAD_EXTRAS}</head>" + html[opening.end() :]
+        return html[: opening.end()] + f"<head>{extras}</head>" + html[opening.end() :]
     return html
 
 

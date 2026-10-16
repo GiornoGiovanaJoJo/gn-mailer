@@ -23,6 +23,7 @@ class CampaignStatus(str, Enum):
 
     DRAFT = "draft"
     SCHEDULED = "scheduled"
+    QUEUED = "queued"
     SENDING = "sending"
     SENT = "sent"
     CANCELLED = "cancelled"
@@ -32,9 +33,17 @@ class CampaignStatus(str, Enum):
         return _STATUS_LABELS[self]
 
 
+# «В очереди» отделено от «Запланирована» намеренно.
+#
+# Раньше одним словом «Запланирована» показывались четыре разных положения дел:
+# назначена на время, ждёт свободного места, перенесена на завтра из-за
+# суточного лимита и поставлена на повтор после сбоя. Человек видел кампанию,
+# которая «не запускается», и заводил такую же ещё раз — а она просто стояла в
+# очереди. Разделение стоит одного статуса и снимает этот вопрос.
 _STATUS_LABELS: dict[CampaignStatus, str] = {
     CampaignStatus.DRAFT: "Черновик",
     CampaignStatus.SCHEDULED: "Запланирована",
+    CampaignStatus.QUEUED: "В очереди",
     CampaignStatus.SENDING: "Отправляется",
     CampaignStatus.SENT: "Отправлена",
     CampaignStatus.CANCELLED: "Отменена",
@@ -46,17 +55,45 @@ _STATUS_LABELS: dict[CampaignStatus, str] = {
 # по смыслу, но ничем не запрещена — например, отправленную кампанию можно было
 # перевести обратно в «Запланирована» и разослать повторно.
 _ALLOWED_TRANSITIONS: dict[CampaignStatus, frozenset[CampaignStatus]] = {
-    CampaignStatus.DRAFT: frozenset({CampaignStatus.SCHEDULED, CampaignStatus.SENDING}),
-    CampaignStatus.SCHEDULED: frozenset(
-        {CampaignStatus.DRAFT, CampaignStatus.SENDING, CampaignStatus.CANCELLED}
+    CampaignStatus.DRAFT: frozenset(
+        {CampaignStatus.SCHEDULED, CampaignStatus.QUEUED, CampaignStatus.SENDING}
     ),
+    CampaignStatus.SCHEDULED: frozenset(
+        {
+            CampaignStatus.DRAFT,
+            CampaignStatus.QUEUED,
+            CampaignStatus.SENDING,
+            CampaignStatus.CANCELLED,
+        }
+    ),
+    # Из очереди кампания либо уходит в отправку, либо возвращается в
+    # «Запланирована»: задача могла потеряться вместе с перезапуском воркера, и
+    # тогда её обязан подобрать следующий тик.
+    CampaignStatus.QUEUED: frozenset(
+        {
+            CampaignStatus.SENDING,
+            CampaignStatus.SCHEDULED,
+            CampaignStatus.DRAFT,
+            CampaignStatus.CANCELLED,
+        }
+    ),
+    # SCHEDULED здесь — не возврат назад, а перенос остатка: суточный лимит
+    # ящика откладывает кампанию на завтра, обрыв SMTP — на повтор через
+    # несколько минут.
     CampaignStatus.SENDING: frozenset(
-        {CampaignStatus.SENT, CampaignStatus.CANCELLED, CampaignStatus.DRAFT}
+        {
+            CampaignStatus.SENT,
+            CampaignStatus.CANCELLED,
+            CampaignStatus.DRAFT,
+            CampaignStatus.SCHEDULED,
+        }
     ),
     # Из финальных состояний выйти можно только явным решением пользователя
     # «отправить заново», которое сбрасывает кампанию в черновик.
     CampaignStatus.SENT: frozenset({CampaignStatus.DRAFT}),
-    CampaignStatus.CANCELLED: frozenset({CampaignStatus.DRAFT, CampaignStatus.SCHEDULED}),
+    CampaignStatus.CANCELLED: frozenset(
+        {CampaignStatus.DRAFT, CampaignStatus.SCHEDULED, CampaignStatus.QUEUED}
+    ),
 }
 
 

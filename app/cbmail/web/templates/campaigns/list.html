@@ -31,7 +31,7 @@
               <td class="text-end">
                 <div class="btn-group" role="group">
                   <a href="/campaigns/{{ c.id }}" class="btn btn-sm btn-outline-info" title="Открыть" aria-label="Открыть кампанию"><i class="bx bx-show"></i></a>
-                  {% if c.status in ['sending','scheduled'] %}
+                  {% if c.status in ['sending','scheduled','queued'] %}
                   <form method="post" action="/campaigns/{{ c.id }}/stop" class="d-inline" onsubmit="return confirm('Остановить рассылку? Кампания сохранится.')">{{ csrf_input(request)|safe }}<button class="btn btn-sm btn-outline-warning" title="Остановить" aria-label="Остановить рассылку"><i class="bx bx-stop-circle"></i></button></form>
                   {% endif %}
                   <form method="post" action="/campaigns/{{ c.id }}/delete" class="d-inline" onsubmit="return confirm('Удалить кампанию безвозвратно?')">{{ csrf_input(request)|safe }}<button class="btn btn-sm btn-outline-danger" title="Удалить" aria-label="Удалить кампанию"><i class="bx bx-trash"></i></button></form>

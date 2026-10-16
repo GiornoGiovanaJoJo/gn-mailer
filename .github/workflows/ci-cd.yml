@@ -83,11 +83,25 @@ jobs:
           export CBMAIL_PORT=8002
           $COMPOSE build cbmail-web
           $COMPOSE up -d --force-recreate cbmail-web
-          $COMPOSE --profile worker up -d --force-recreate cbmail-worker
+          # Без --force-recreate: им убивало рассылку посреди отправки на каждой
+          # выкатке. docker compose сам пересоздаёт контейнер, когда изменился
+          # образ или настройки, — этого достаточно.
+          $COMPOSE --profile worker up -d cbmail-worker cbmail-scheduler
           echo "Ожидание health..."
           for i in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8002/health || echo 000)
-            if [ "$code" = "200" ]; then echo "health 200 (за $i)"; exit 0; fi
+            if [ "$code" = "200" ]; then
+              echo "health 200 (за $i)"
+              # Без планировщика запланированные кампании просто не уходят, а
+              # health при этом зелёный — ровно та поломка, которую не замечали.
+              if [ "$(docker inspect -f '{{.State.Running}}' cbmail-scheduler 2>/dev/null)" != "true" ]; then
+                echo "Планировщик не запущен — расписание работать не будет."
+                docker logs cbmail-scheduler --tail 40 || true
+                exit 1
+              fi
+              echo "Планировщик работает"
+              exit 0
+            fi
             sleep 2
           done
           echo "health не поднялся до 200"; docker logs cbmail-web --tail 30; exit 1

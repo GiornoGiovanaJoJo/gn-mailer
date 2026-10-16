@@ -49,6 +49,16 @@ _LOG_COLUMN_ALTERS = (
     'ON mail_massmaillog (campaign_id, email)',
 )
 
+_CAMPAIGN_COLUMN_ALTERS = (
+    # Метка запуска отправки (см. Campaign.run_token): без неё задача, пережившая
+    # перезапуск воркера, затирала статус, выставленный человеком.
+    'ALTER TABLE mail_massmailcampaign ADD COLUMN IF NOT EXISTS run_token varchar(32)',
+    # Диспетчер выбирает кампании по статусу и времени на каждом тике — раз в
+    # минуту по всей таблице.
+    'CREATE INDEX IF NOT EXISTS mail_massmailcampaign_status_sched_idx '
+    'ON mail_massmailcampaign (status, scheduled_time)',
+)
+
 _SMTP_COLUMN_ALTERS = (
     'ALTER TABLE mail_usersettingssmtp ADD COLUMN IF NOT EXISTS daily_limit integer NOT NULL DEFAULT 0',
     'ALTER TABLE mail_usersettingssmtp ADD COLUMN IF NOT EXISTS project_id bigint '
@@ -74,6 +84,11 @@ def ensure_app_tables() -> None:
             for ddl in _LOG_COLUMN_ALTERS:
                 conn.execute(text(ddl))
         logger.info("Колонки трекинга на mail_massmaillog готовы")
+
+        with engine.begin() as conn:
+            for ddl in _CAMPAIGN_COLUMN_ALTERS:
+                conn.execute(text(ddl))
+        logger.info("Колонка run_token на mail_massmailcampaign готова")
 
 
 # Прежнее имя — чтобы не ломать внешние вызовы, если где-то остались.

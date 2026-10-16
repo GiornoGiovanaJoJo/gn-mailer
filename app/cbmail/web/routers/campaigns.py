@@ -49,7 +49,11 @@ logger = logging.getLogger(__name__)
 
 _MAX_ATTACHMENTS = 3
 _PER_PAGE = 25
-_STOPPABLE = {CampaignStatus.SENDING.value, CampaignStatus.SCHEDULED.value}
+_STOPPABLE = {
+    CampaignStatus.SENDING.value,
+    CampaignStatus.SCHEDULED.value,
+    CampaignStatus.QUEUED.value,
+}
 
 
 async def _user_profiles(db: AsyncSession, user: Profile) -> list[SmtpProfile]:
@@ -621,11 +625,17 @@ async def _enqueue(db: AsyncSession, campaign: Campaign) -> None:
     «не запустилась», перезапускал её и заводил вторую такую же — а она просто
     стояла в очереди.
 
+    Статус именно «В очереди», а не «Запланирована». Разница не косметическая:
+    «Запланирована» означает «ждёт назначенного времени», и человек, видя её у
+    кампании, запущенной только что, считал сервис сломанным. Плюс по этому
+    статусу тик расписания отличает уже поставленные кампании от ожидающих и
+    не кладёт в очередь вторую копию каждую минуту.
+
     Время отправки ставим текущее: если задача до воркера не доедет (перезапуск,
-    потерянное сообщение), кампанию подберёт обычный тик расписания. Повторного
-    запуска это не вызывает — захват кампании атомарный.
+    потерянное сообщение), кампанию вернёт в расписание сборщик зависших.
+    Повторного запуска это не вызывает — захват кампании атомарный.
     """
-    campaign.status = CampaignStatus.SCHEDULED.value
+    campaign.status = CampaignStatus.QUEUED.value
     campaign.scheduled_time = datetime.now(timezone.utc)
     await db.commit()
 
@@ -661,6 +671,13 @@ async def send_now(
         return redirect("/campaigns/", err="Кампания не найдена.")
     if campaign.status in (CampaignStatus.SENDING.value, CampaignStatus.SENT.value):
         return redirect(f"/campaigns/{campaign_id}", err="Кампания уже отправляется или отправлена.")
+    if campaign.status == CampaignStatus.QUEUED.value:
+        # Повторное нажатие ничего бы не сломало (захват атомарный), но молча
+        # ничего не делать нельзя: именно так и появлялись кампании-двойники.
+        return redirect(
+            f"/campaigns/{campaign_id}",
+            err="Кампания уже в очереди — она уйдёт, как только освободится место.",
+        )
 
     await _enqueue(db, campaign)
     return redirect(

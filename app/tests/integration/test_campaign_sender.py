@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from cbmail.db.models import Campaign, CampaignLog
@@ -422,17 +422,17 @@ class TestCancellation:
         monkeypatch.setattr(campaign_sender, "SmtpSession", fake)
         campaign = make_campaign(recipient_emails="a@x.ru, b@x.ru, c@x.ru, d@x.ru", message_count=1)
 
-        original = campaign_sender._is_cancelled
+        original = campaign_sender._must_stop
         calls = {"n": 0}
 
-        def cancel_after_two(session: Session, campaign_id: int) -> bool:
+        def cancel_after_two(session: Session, campaign_id: int, run_token: str | None) -> bool:
             calls["n"] += 1
             # Отменяем после того, как ушли первые письма.
             if calls["n"] > 3:
                 return True
-            return original(session, campaign_id)
+            return original(session, campaign_id, run_token)
 
-        monkeypatch.setattr(campaign_sender, "_is_cancelled", cancel_after_two)
+        monkeypatch.setattr(campaign_sender, "_must_stop", cancel_after_two)
 
         result = _send(db, campaign.id)
 
@@ -611,9 +611,160 @@ class TestScheduling:
         make_campaign(status="draft", scheduled_time=NOW - timedelta(hours=1))
         assert find_due_campaigns(db, NOW) == []
 
+    def test_due_campaign_is_marked_queued(self, db: Session, make_campaign) -> None:
+        campaign = make_campaign(status="scheduled", scheduled_time=NOW - timedelta(minutes=1))
+        find_due_campaigns(db, NOW)
+        db.expire_all()
+        assert db.get(Campaign, campaign.id).status == "queued"  # type: ignore[union-attr]
+
+    @pytest.mark.regression
+    def test_campaign_is_not_queued_twice(self, db: Session, make_campaign) -> None:
+        """Повторный тик не кладёт в очередь вторую копию той же кампании.
+
+        Пока все места воркера заняты, тик идёт каждую минуту. Раньше он только
+        читал список, и за час простоя в очереди накапливались десятки копий
+        одной задачи. Очередь разбирается по порядку, поэтому освободившееся
+        место доставало самую старую копию, а кампания, которую человек
+        остановил и запустил заново, стояла в хвосте за ними и не стартовала.
+        """
+        make_campaign(status="scheduled", scheduled_time=NOW - timedelta(minutes=1))
+        assert len(find_due_campaigns(db, NOW)) == 1
+        assert find_due_campaigns(db, NOW) == []
+
+
+class TestRunOwnership:
+    """Итог отправки записывает только тот запуск, который её ведёт.
+
+    Пауза между письмами длится минутами, и за это время кампанию успевают
+    остановить и запустить заново. Раньше проснувшийся старый поток дописывал
+    свой итог поверх: нажатый «Стоп» превращался обратно в «Отправлена», а
+    поставленная в очередь кампания — в «Черновик», которого расписание не
+    видит. Снаружи это и выглядело как «кампания больше не запускается».
+    """
+
+    @staticmethod
+    def _steal(db: Session, campaign_id: int, owner: str = "другой-запуск") -> None:
+        """Перехватить кампанию другим запуском — как делает повторный пуск.
+
+        Пишем запросом, а не через объект: объект принадлежит старому запуску,
+        и именно его метку проверяет защита.
+        """
+        db.execute(update(Campaign).where(Campaign.id == campaign_id).values(run_token=owner))
+        db.commit()
+
+    @pytest.mark.regression
+    def test_old_run_does_not_overwrite_new_status(
+        self, db: Session, make_campaign
+    ) -> None:
+        campaign = make_campaign(status="scheduled", scheduled_time=NOW)
+        acquired = campaign_sender._acquire(db, campaign.id, force=False, now=lambda: NOW)
+        token = acquired.run_token
+        assert token
+
+        # Человек остановил рассылку и тут же запустил её заново.
+        self._steal(db, campaign.id)
+        acquired.run_token = token
+
+        campaign_sender._finish(db, acquired, campaign_sender.CampaignStatus.SENT, now=lambda: NOW)
+
+        db.expire_all()
+        refreshed = db.get(Campaign, campaign.id)
+        assert refreshed is not None
+        assert refreshed.status == "sending", "старый запуск не вправе объявлять кампанию отправленной"
+
+    @pytest.mark.regression
+    def test_old_run_does_not_demote_to_draft(self, db: Session, make_campaign) -> None:
+        campaign = make_campaign(status="scheduled", scheduled_time=NOW)
+        acquired = campaign_sender._acquire(db, campaign.id, force=False, now=lambda: NOW)
+        token = acquired.run_token
+
+        self._steal(db, campaign.id)
+        acquired.run_token = token
+
+        campaign_sender._abort(db, acquired, "сбой старого запуска", now=lambda: NOW)
+
+        db.expire_all()
+        assert db.get(Campaign, campaign.id).status == "sending"  # type: ignore[union-attr]
+        # Но след об ошибке остаётся: разбираться с ней всё равно придётся.
+        logged = db.execute(
+            select(CampaignLog).where(CampaignLog.campaign_id == campaign.id)
+        ).scalars().all()
+        assert any("сбой старого запуска" in (entry.error_message or "") for entry in logged)
+
+    def test_running_campaign_stops_when_ownership_changes(
+        self, db: Session, make_campaign
+    ) -> None:
+        campaign = make_campaign(status="scheduled", scheduled_time=NOW)
+        acquired = campaign_sender._acquire(db, campaign.id, force=False, now=lambda: NOW)
+        token = acquired.run_token
+
+        assert not campaign_sender._must_stop(db, campaign.id, token)
+
+        self._steal(db, campaign.id)
+        assert campaign_sender._must_stop(db, campaign.id, token)
+
+    def test_queued_campaign_can_be_acquired(self, db: Session, make_campaign) -> None:
+        """Тик помечает кампанию «В очереди» — захват обязан это принимать."""
+        campaign = make_campaign(status="queued", scheduled_time=NOW)
+        acquired = campaign_sender._acquire(db, campaign.id, force=False, now=lambda: NOW)
+        assert acquired.status == "sending"
+
+
+class TestGracefulShutdown:
+    """Выкатка не должна рвать рассылку на полуслове."""
+
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        campaign_sender.cancel_shutdown()
+        yield
+        campaign_sender.cancel_shutdown()
+
+    @pytest.mark.regression
+    def test_campaign_returns_to_schedule_on_shutdown(
+        self, db: Session, make_campaign, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Остановка воркера возвращает кампанию в расписание, а не бросает.
+
+        Каждый пуш в main пересоздавал контейнер воркера. Кампания оставалась
+        «Отправляется» с половиной разосланных писем и ждала сборщика зависших
+        четверть часа — а при занятом планировщике не возобновлялась вовсе.
+        """
+        fake = FakeSmtp()
+        monkeypatch.setattr(campaign_sender, "SmtpSession", fake)
+        campaign = make_campaign(recipient_emails="a@x.ru, b@x.ru, c@x.ru", message_count=1)
+
+        original = campaign_sender._must_stop
+        calls = {"n": 0}
+
+        def shutdown_after_one(session: Session, campaign_id: int, run_token: str | None) -> bool:
+            calls["n"] += 1
+            if calls["n"] > 1:
+                campaign_sender.request_shutdown()
+            return original(session, campaign_id, run_token)
+
+        monkeypatch.setattr(campaign_sender, "_must_stop", shutdown_after_one)
+
+        result = _send(db, campaign.id)
+
+        assert result.shutting_down
+        db.expire_all()
+        refreshed = db.get(Campaign, campaign.id)
+        assert refreshed is not None
+        assert refreshed.status == "scheduled", "остаток должен уйти сам после перезапуска"
+        assert refreshed.scheduled_time is not None
+        # Отправленные адреса зафиксированы — при повторе они отсеются.
+        assert len(fake.sent) < 3
+
 
 class TestZombieRecovery:
-    def test_stuck_campaign_is_reset(self, db: Session, make_campaign) -> None:
+    def test_stuck_campaign_returns_to_schedule(self, db: Session, make_campaign) -> None:
+        """Брошенная кампания возвращается в расписание, а не в черновик.
+
+        Черновик расписание не видит. Кампания, прерванная выкаткой посреди
+        рассылки, оставалась лежать с половиной разосланных писем и ждала,
+        пока человек заметит её и запустит руками — а замечали обычно по
+        жалобе получателей, которым письмо не пришло.
+        """
         campaign = make_campaign(
             status="sending", message_interval=0, updated_at=NOW - timedelta(hours=2)
         )
@@ -621,7 +772,28 @@ class TestZombieRecovery:
 
         assert recovered == [campaign.id]
         db.expire_all()
-        assert db.get(Campaign, campaign.id).status == "draft"  # type: ignore[union-attr]
+        refreshed = db.get(Campaign, campaign.id)
+        assert refreshed is not None
+        assert refreshed.status == "scheduled"
+        # Время — «сейчас», иначе ближайший тик её не подберёт.
+        assert refreshed.scheduled_time is not None
+
+    def test_campaign_stuck_in_queue_returns_to_schedule(
+        self, db: Session, make_campaign
+    ) -> None:
+        """Задача могла не доехать до воркера — кампания не должна зависнуть.
+
+        Перезапуск брокера теряет поставленные сообщения. Без этого возврата
+        кампания осталась бы «В очереди» навсегда: тик такие не выбирает.
+        """
+        campaign = make_campaign(status="queued", updated_at=NOW - timedelta(hours=1))
+        assert recover_stuck_campaigns(db, NOW) == [campaign.id]
+        db.expire_all()
+        assert db.get(Campaign, campaign.id).status == "scheduled"  # type: ignore[union-attr]
+
+    def test_freshly_queued_campaign_is_left_alone(self, db: Session, make_campaign) -> None:
+        make_campaign(status="queued", updated_at=NOW - timedelta(minutes=1))
+        assert recover_stuck_campaigns(db, NOW) == []
 
     @pytest.mark.regression
     def test_active_campaign_with_long_interval_is_not_reset(

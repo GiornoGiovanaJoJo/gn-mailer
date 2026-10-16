@@ -33,6 +33,7 @@ import logging
 import queue
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -77,6 +78,11 @@ LOG_SYSTEM = "system"
 ZOMBIE_BASE_MINUTES = 15
 ZOMBIE_HEADROOM_MINUTES = 10
 
+# Сколько кампания может простоять «В очереди», прежде чем считать задачу
+# потерянной и вернуть кампанию в расписание. С запасом относительно минутного
+# тика: очередь бывает длинной, и ждать своего места — это нормально.
+QUEUE_STALE_MINUTES = 20
+
 # Сколько раз за один заход переоткрывать оборвавшееся SMTP-соединение и
 # продолжать с оставшихся адресов. Нужно, потому что некоторые провайдеры
 # (в частности mail.ru) периодически рвут соединение на очередном письме —
@@ -114,11 +120,32 @@ class SendResult:
     """Часть аудитории перенесена на следующие сутки из-за суточного лимита ящика."""
     interrupted: bool = False
     """Соединение рвалось чаще бюджета переподключений — остаток не обработан, нужен повтор."""
+    shutting_down: bool = False
+    """Воркер останавливают (выкатка) — остаток дошлём после перезапуска."""
     errors: list[str] = field(default_factory=list)
 
     @property
     def total_processed(self) -> int:
         return self.sent + self.failed
+
+
+# Воркер получил SIGTERM — обычно это выкатка новой версии.
+#
+# Раньше рассылку в этот момент просто убивали: кампания оставалась в статусе
+# «Отправляется» с половиной разосланных писем, и вернуть её в работу мог
+# только сборщик зависших — через четверть часа. Теперь отправка замечает
+# остановку на ближайшей границе между письмами и сама просит повтор.
+_SHUTDOWN = threading.Event()
+
+
+def request_shutdown() -> None:
+    """Попросить идущие рассылки завершиться на ближайшей границе письма."""
+    _SHUTDOWN.set()
+
+
+def cancel_shutdown() -> None:
+    """Сбросить признак остановки (нужно тестам и перезапуску в одном процессе)."""
+    _SHUTDOWN.clear()
 
 
 def send_campaign(
@@ -227,6 +254,7 @@ def send_campaign(
                 live,
                 session=session,
                 campaign_id=campaign_id,
+                run_token=campaign.run_token,
                 pending=pending,
                 message=message,
                 attachments=attachments,
@@ -242,7 +270,15 @@ def send_campaign(
         if not pending.empty() and not result.stopped_by_user and not result.interrupted:
             capped_by_limit = True
 
-        if result.stopped_by_user:
+        if result.shutting_down:
+            # Выкатка новой версии. Остаток дошлём, как только воркер поднимется:
+            # возвращаем кампанию в расписание сами, не дожидаясь сборщика
+            # зависших — иначе рассылка стояла бы ещё четверть часа.
+            _requeue_for_retry(
+                session, campaign, "Сервис перезапускался — остаток будет дослан", now=now
+            )
+            result.deferred = True
+        elif result.stopped_by_user:
             _finish(session, campaign, CampaignStatus.CANCELLED, now=now)
         elif result.interrupted:
             # Соединение рвалось чаще бюджета переподключений — часть адресов не
@@ -283,7 +319,7 @@ def send_campaign(
         # возвращаем в черновик, чтобы её можно было перезапустить осознанно.
         logger.exception("Кампания %s упала при отправке", campaign_id)
         session.rollback()
-        _abort(session, campaign_id, f"Сбой отправки: {exc}", now=now)
+        _abort(session, campaign, f"Сбой отправки: {exc}", now=now)
         raise
 
 
@@ -309,15 +345,22 @@ def _acquire(
         # отправить кампанию само, форс-запуск разослал бы всё повторно.
         raise CampaignNotSendable("Кампания уже отправлена — повторная отправка не выполняется")
 
-    if not force and campaign.status not in (CampaignStatus.SCHEDULED, CampaignStatus.DRAFT):
+    if not force and campaign.status not in (
+        CampaignStatus.SCHEDULED,
+        CampaignStatus.QUEUED,
+        CampaignStatus.DRAFT,
+    ):
         raise CampaignNotSendable(
             f"Кампанию нельзя отправить из статуса «{CampaignStatus(campaign.status).label}»"
         )
 
+    # Метка запуска: по ней последующие записи статуса отличают «эту отправку»
+    # от задачи-двойника, пережившей перезапуск воркера.
+    token = uuid.uuid4().hex
     claimed = session.execute(
         update(Campaign)
         .where(Campaign.id == campaign_id, Campaign.status != CampaignStatus.SENDING.value)
-        .values(status=CampaignStatus.SENDING.value, updated_at=now())
+        .values(status=CampaignStatus.SENDING.value, run_token=token, updated_at=now())
         .returning(Campaign.id)
     ).scalar_one_or_none()
 
@@ -356,17 +399,56 @@ def _start(
     session.commit()
 
 
+def _write_status(
+    session: Session,
+    campaign: Campaign,
+    values: dict[str, object],
+    *,
+    now: Callable[[], datetime],
+) -> bool:
+    """Записать итог отправки — но только от имени текущего запуска.
+
+    Условие на метку запуска здесь важнее, чем кажется. Пауза между письмами
+    может длиться минуты, и за это время кампанию успевают остановить и
+    запустить заново. Без проверки старый поток, проснувшись, дописывал свой
+    итог поверх: нажатый «Стоп» превращался обратно в «Отправлена», а заново
+    поставленная в очередь кампания — в «Черновик», которого расписание уже не
+    видит. Снаружи это выглядело как «кампания больше никогда не запускается».
+
+    Ноль затронутых строк означает, что отправку перехватил кто-то другой —
+    это штатный исход, а не сбой: новый запуск сам доведёт кампанию до конца.
+    """
+    token = campaign.run_token
+    result = session.execute(
+        update(Campaign)
+        .where(
+            Campaign.id == campaign.id,
+            Campaign.status == CampaignStatus.SENDING.value,
+            Campaign.run_token == token,
+        )
+        .values(**values, updated_at=now())
+    )
+    session.commit()
+    if not result.rowcount:
+        logger.info(
+            "Кампания %s: итог запуска %s не записан — отправку уже ведёт другой запуск",
+            campaign.id,
+            token,
+        )
+        return False
+    return True
+
+
 def _finish(
     session: Session,
-    campaign: Campaign | int,
+    campaign: Campaign,
     status: CampaignStatus,
     *,
     now: Callable[[], datetime],
     total: int | None = None,
     sent: int | None = None,
 ) -> None:
-    campaign_id = campaign if isinstance(campaign, int) else campaign.id
-    values: dict[str, object] = {"status": status.value, "updated_at": now()}
+    values: dict[str, object] = {"status": status.value, "run_token": None}
     if status is CampaignStatus.SENT:
         values["sent_at"] = now()
     if total is not None:
@@ -374,54 +456,61 @@ def _finish(
     if sent is not None:
         values["sent_count"] = sent
 
-    session.execute(update(Campaign).where(Campaign.id == campaign_id).values(**values))
-    session.commit()
+    _write_status(session, campaign, values, now=now)
 
 
 def _release(
     session: Session, campaign: Campaign, status: CampaignStatus, *, now: Callable[[], datetime]
 ) -> None:
-    session.execute(
-        update(Campaign)
-        .where(Campaign.id == campaign.id)
-        .values(status=status.value, updated_at=now())
-    )
-    session.commit()
+    _write_status(session, campaign, {"status": status.value, "run_token": None}, now=now)
 
 
 def _abort(
-    session: Session, campaign: Campaign | int, reason: str, *, now: Callable[[], datetime]
+    session: Session, campaign: Campaign, reason: str, *, now: Callable[[], datetime]
 ) -> None:
     """Вернуть кампанию в черновик и записать причину.
 
     Расписание НЕ стирается: в старой версии при временной недоступности SMTP
     поле ``scheduled_time`` обнулялось, и пользователь молча терял назначенное
     им время отправки.
+
+    Запись в журнал идёт всегда, даже если статус писать уже не наше дело:
+    ошибка случилась, и след о ней нужен тому, кто будет разбираться.
     """
-    campaign_id = campaign if isinstance(campaign, int) else campaign.id
     session.add(
         CampaignLog(
-            campaign_id=campaign_id,
+            campaign_id=campaign.id,
             email=LOG_SYSTEM,
             status=LOG_FAILED,
             error_message=reason[:2000],
         )
     )
-    session.execute(
-        update(Campaign)
-        .where(Campaign.id == campaign_id)
-        .values(status=CampaignStatus.DRAFT.value, updated_at=now())
+    _write_status(
+        session,
+        campaign,
+        {"status": CampaignStatus.DRAFT.value, "run_token": None},
+        now=now,
     )
-    session.commit()
 
 
-def _is_cancelled(session: Session, campaign_id: int) -> bool:
-    """Проверка кнопки «Стоп» — один дешёвый запрос по первичному ключу."""
+def _must_stop(session: Session, campaign_id: int, run_token: str | None) -> bool:
+    """Пора ли прекращать отправку — один дешёвый запрос по первичному ключу.
+
+    Проверяем не только нажатый «Стоп», но и то, что рассылку всё ещё ведём мы.
+    Между письмами проходят минуты, и за это время кампанию успевают остановить
+    и запустить заново. Раньше проверка смотрела только на статус «Отменена»:
+    перезапущенная кампания получала статус «Запланирована», старый поток видел
+    «не отменена» и продолжал слать — то есть по одному списку шли два потока,
+    а человек получал дубли писем.
+    """
     session.expire_all()
-    status = session.execute(
-        select(Campaign.status).where(Campaign.id == campaign_id)
-    ).scalar_one_or_none()
-    return status == CampaignStatus.CANCELLED.value
+    row = session.execute(
+        select(Campaign.status, Campaign.run_token).where(Campaign.id == campaign_id)
+    ).one_or_none()
+    if row is None:
+        return True
+    status, token = row
+    return status != CampaignStatus.SENDING.value or token != run_token
 
 
 # --- Подготовка данных -------------------------------------------------------
@@ -568,7 +657,7 @@ def _next_day_start(moment: datetime) -> datetime:
 
 
 def _defer_to_next_day(
-    session: Session, campaign: Campaign | int, reason: str, *, now: Callable[[], datetime]
+    session: Session, campaign: Campaign, reason: str, *, now: Callable[[], datetime]
 ) -> None:
     """Перенести кампанию на начало следующих суток (для суточного лимита).
 
@@ -576,56 +665,54 @@ def _defer_to_next_day(
     планировщик подхватит кампанию, когда лимит ящика обнулится, и дошлёт
     остаток (уже отправленные адреса отфильтруются автоматически).
     """
-    campaign_id = campaign if isinstance(campaign, int) else campaign.id
     next_run = _next_day_start(now())
     session.add(
         CampaignLog(
-            campaign_id=campaign_id,
+            campaign_id=campaign.id,
             email=LOG_SYSTEM,
             status="deferred",
             error_message=(f"{reason}. Перенесено на {next_run:%d.%m.%Y %H:%M} UTC.")[:2000],
         )
     )
-    session.execute(
-        update(Campaign)
-        .where(Campaign.id == campaign_id)
-        .values(
-            status=CampaignStatus.SCHEDULED.value,
-            scheduled_time=next_run,
-            updated_at=now(),
-        )
+    _write_status(
+        session,
+        campaign,
+        {
+            "status": CampaignStatus.SCHEDULED.value,
+            "scheduled_time": next_run,
+            "run_token": None,
+        },
+        now=now,
     )
-    session.commit()
 
 
 def _requeue_for_retry(
-    session: Session, campaign: Campaign | int, reason: str, *, now: Callable[[], datetime]
+    session: Session, campaign: Campaign, reason: str, *, now: Callable[[], datetime]
 ) -> None:
     """Поставить кампанию на скорый повтор (обрыв соединения не по вине адресов).
 
     Статус «Запланирована», время — через ``RETRY_DELAY_MINUTES`` минут: планировщик
     подхватит её и дошлёт необработанных получателей (уже отправленные отсеются).
     """
-    campaign_id = campaign if isinstance(campaign, int) else campaign.id
     next_run = now() + timedelta(minutes=RETRY_DELAY_MINUTES)
     session.add(
         CampaignLog(
-            campaign_id=campaign_id,
+            campaign_id=campaign.id,
             email=LOG_SYSTEM,
             status="deferred",
             error_message=(f"{reason}. Повтор в {next_run:%d.%m.%Y %H:%M} UTC.")[:2000],
         )
     )
-    session.execute(
-        update(Campaign)
-        .where(Campaign.id == campaign_id)
-        .values(
-            status=CampaignStatus.SCHEDULED.value,
-            scheduled_time=next_run,
-            updated_at=now(),
-        )
+    _write_status(
+        session,
+        campaign,
+        {
+            "status": CampaignStatus.SCHEDULED.value,
+            "scheduled_time": next_run,
+            "run_token": None,
+        },
+        now=now,
     )
-    session.commit()
 
 
 def _compose(campaign: Campaign) -> composer.ComposedMessage:
@@ -784,6 +871,7 @@ def _run_sender(
     *,
     session: Session,
     campaign_id: int,
+    run_token: str | None,
     pending: queue.Queue[str],
     cancelled: threading.Event,
     message: composer.ComposedMessage,
@@ -865,7 +953,15 @@ def _run_sender(
                 result.skipped_stoplist += 1
                 continue
 
-            if _is_cancelled(session, campaign_id):
+            if _SHUTDOWN.is_set():
+                # Воркер останавливают. Выходим на границе между письмами, не
+                # начиная новое: письмо, оборванное на полпути, пришлось бы
+                # считать неотправленным, хотя адресат его, возможно, получил.
+                cancelled.set()
+                result.shutting_down = True
+                return result
+
+            if _must_stop(session, campaign_id, run_token):
                 cancelled.set()
                 result.stopped_by_user = True
                 return result
@@ -883,7 +979,11 @@ def _run_sender(
                 _drop()
                 sleep(interval)
                 _heartbeat(session, campaign_id, now=now)
-                if _is_cancelled(session, campaign_id):
+                if _SHUTDOWN.is_set():
+                    cancelled.set()
+                    result.shutting_down = True
+                    return result
+                if _must_stop(session, campaign_id, run_token):
                     cancelled.set()
                     result.stopped_by_user = True
                     return result
@@ -947,6 +1047,7 @@ def _dispatch(
     *,
     session: Session,
     campaign_id: int,
+    run_token: str | None,
     pending: queue.Queue[str],
     message: composer.ComposedMessage,
     attachments: list[Attachment],
@@ -971,6 +1072,7 @@ def _dispatch(
                 senders[0],
                 session=session,
                 campaign_id=campaign_id,
+                run_token=run_token,
                 pending=pending,
                 cancelled=cancelled,
                 message=message,
@@ -994,6 +1096,7 @@ def _dispatch(
                     sender,
                     session=own,
                     campaign_id=campaign_id,
+                    run_token=run_token,
                     pending=pending,
                     cancelled=cancelled,
                     message=message,
@@ -1024,6 +1127,12 @@ def _merge(result: SendResult, parts: list[SendResult]) -> None:
         result.errors.extend(part.errors)
         result.stopped_by_user = result.stopped_by_user or part.stopped_by_user
         result.interrupted = result.interrupted or part.interrupted
+        result.shutting_down = result.shutting_down or part.shutting_down
+        # ``deferred`` намеренно НЕ сводится: у ящика он значит «моя квота на
+        # сегодня кончилась», у кампании — «остаток перенесён на завтра».
+        # Ящик может упереться в лимит на последнем адресе, когда рассылка уже
+        # закончена, — переносить тогда нечего. Решение принимает верхний
+        # уровень по непустой очереди адресов (capped_by_limit).
 
 
 def _is_fatal(exc: SmtpError) -> bool:
@@ -1098,68 +1207,137 @@ def _base_url() -> str:
 
 
 def find_due_campaigns(session: Session, now: datetime) -> list[int]:
-    """Кампании, которым пора уходить.
+    """Забрать наступившие кампании в очередь и вернуть их идентификаторы.
 
     Условие строгое: статус «Запланирована» И время задано И оно наступило.
     Отсутствие времени никогда не означает «отправить сейчас».
+
+    Отбор и пометка — одним ``UPDATE ... RETURNING``, и это не оптимизация.
+    Раньше тик только читал список, ничего не меняя в базе: пока все места
+    воркера заняты, одна и та же кампания уходила в очередь заново каждую
+    минуту. За час простоя там накапливались десятки копий одной задачи, а
+    очередь разбирается по порядку — освободившееся место доставало самую
+    старую копию вместо того, что человек запустил только что. Кампания,
+    которую остановили и запустили заново, оказывалась в хвосте за этими
+    копиями и не стартовала вовсе. Помеченную «В очереди» следующий тик уже не
+    видит, поэтому дубликатов не возникает.
     """
     from cbmail.domain.campaign import SCHEDULE_TOLERANCE_SECONDS
 
     threshold = now + timedelta(seconds=SCHEDULE_TOLERANCE_SECONDS)
-    rows = session.execute(
-        select(Campaign.id).where(
-            Campaign.status == CampaignStatus.SCHEDULED.value,
-            Campaign.scheduled_time.is_not(None),
-            Campaign.scheduled_time <= threshold,
+    rows = (
+        session.execute(
+            update(Campaign)
+            .where(
+                Campaign.status == CampaignStatus.SCHEDULED.value,
+                Campaign.scheduled_time.is_not(None),
+                Campaign.scheduled_time <= threshold,
+            )
+            .values(status=CampaignStatus.QUEUED.value, updated_at=now)
+            .returning(Campaign.id)
         )
-    ).scalars()
+        .scalars()
+        .all()
+    )
+    session.commit()
     return list(rows)
 
 
-def recover_stuck_campaigns(session: Session, now: datetime) -> list[int]:
-    """Вернуть в черновик кампании, брошенные упавшим воркером.
+def _as_utc(value: datetime | None) -> datetime | None:
+    """Привести отметку времени из БД к UTC-aware.
 
-    Порог зависит от настроенного интервала между письмами: кампания с паузой
-    в десять минут не подаёт признаков жизни дольше, чем кампания без пауз, и
-    не должна из-за этого считаться зависшей. Раньше фиксированный порог
-    сбрасывал в черновик активно работающие рассылки прямо посреди отправки.
+    SQLite возвращает naive datetime, Postgres — aware. Сравнивать их напрямую
+    нельзя: Python бросает TypeError.
     """
-    longest_interval = (
-        session.execute(
-            select(func.max(Campaign.message_interval)).where(
-                Campaign.status == CampaignStatus.SENDING.value
-            )
-        ).scalar()
-        or 0
-    )
-    headroom = max(
-        ZOMBIE_BASE_MINUTES, longest_interval // 60 + ZOMBIE_HEADROOM_MINUTES
-    )
-    threshold = now - timedelta(minutes=headroom)
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
-    stuck = session.execute(
-        select(Campaign.id).where(
-            Campaign.status == CampaignStatus.SENDING.value, Campaign.updated_at < threshold
+
+def recover_stuck_campaigns(session: Session, now: datetime) -> list[int]:
+    """Вернуть в работу кампании, брошенные упавшим или перезапущенным воркером.
+
+    Возвращаем в «Запланирована» со временем «сейчас», а НЕ в «Черновик».
+    Черновик расписание не видит: кампания, прерванная выкаткой посреди
+    рассылки, оставалась лежать с половиной разосланных писем и не
+    возобновлялась, пока человек сам её не замечал. Уже отправленные адреса
+    отфильтруются при следующем заходе, так что повторных писем это не даёт.
+
+    Зависнуть можно в двух местах:
+
+    * «Отправляется» без признаков жизни — воркера убили посреди отправки.
+      Порог у каждой кампании свой, по её интервалу между письмами: при паузе
+      в полчаса молчание в двадцать минут — это норма, а не зависание. Общий
+      порог по самой медленной кампании маскировал настоящие зависания всех
+      остальных.
+    * «В очереди» дольше разумного — задача не доехала до воркера (перезапуск
+      брокера, потерянное сообщение).
+    """
+    recovered: list[int] = []
+
+    sending = session.execute(
+        select(Campaign.id, Campaign.message_interval, Campaign.updated_at).where(
+            Campaign.status == CampaignStatus.SENDING.value
         )
-    ).scalars().all()
-
-    for campaign_id in stuck:
-        logger.warning("Кампания %s зависла в отправке — сбрасываю в черновик", campaign_id)
+    ).all()
+    for campaign_id, interval, updated_at in sending:
+        headroom = max(
+            ZOMBIE_BASE_MINUTES, (interval or 0) // 60 + ZOMBIE_HEADROOM_MINUTES
+        )
+        last_seen = _as_utc(updated_at)
+        if last_seen is not None and last_seen >= now - timedelta(minutes=headroom):
+            continue
+        logger.warning("Кампания %s зависла в отправке — возвращаю в расписание", campaign_id)
         session.add(
             CampaignLog(
                 campaign_id=campaign_id,
                 email=LOG_SYSTEM,
                 status=LOG_FAILED,
-                error_message=f"Брошена в статусе «Отправляется» дольше {headroom} мин — сброшена",
+                error_message=(
+                    f"Брошена в статусе «Отправляется» дольше {headroom} мин — "
+                    "возвращена в расписание, остаток уйдёт автоматически"
+                ),
             )
         )
+        recovered.append(campaign_id)
+
+    stale_queue = now - timedelta(minutes=QUEUE_STALE_MINUTES)
+    queued = session.execute(
+        select(Campaign.id, Campaign.updated_at).where(
+            Campaign.status == CampaignStatus.QUEUED.value
+        )
+    ).all()
+    for campaign_id, updated_at in queued:
+        last_seen = _as_utc(updated_at)
+        if last_seen is not None and last_seen >= stale_queue:
+            continue
+        logger.warning("Кампания %s застряла в очереди — возвращаю в расписание", campaign_id)
+        session.add(
+            CampaignLog(
+                campaign_id=campaign_id,
+                email=LOG_SYSTEM,
+                status=LOG_FAILED,
+                error_message=(
+                    f"Простояла в очереди дольше {QUEUE_STALE_MINUTES} мин — "
+                    "задача потеряна, кампания возвращена в расписание"
+                ),
+            )
+        )
+        recovered.append(campaign_id)
+
+    for campaign_id in recovered:
         session.execute(
             update(Campaign)
             .where(Campaign.id == campaign_id)
-            .values(status=CampaignStatus.DRAFT.value, updated_at=now)
+            .values(
+                status=CampaignStatus.SCHEDULED.value,
+                scheduled_time=now,
+                run_token=None,
+                updated_at=now,
+            )
         )
     session.commit()
-    return list(stuck)
+    return recovered
 
 
 def iter_recipients_preview(campaign: Campaign, limit: int = 50) -> Iterator[str]:

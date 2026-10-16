@@ -39,6 +39,9 @@ services:
       - "${CBMAIL_PORT:-8002}:8000"
     restart: unless-stopped
 
+  # Рассылки. Отправка занимает процесс на часы, поэтому расписание вынесено в
+  # отдельный контейнер (cbmail-scheduler): раньше они делили один пул, и при
+  # трёх идущих рассылках расписание переставало работать совсем.
   cbmail-worker:
     build:
       context: .
@@ -53,6 +56,38 @@ services:
       CELERY_BROKER_URL: redis://cb-mail-redis:6379/0
       CELERY_RESULT_BACKEND: redis://cb-mail-redis:6379/0
       PUBLIC_BASE_URL: ${CBMAIL_PUBLIC_URL:-http://81.177.139.113:8002}
+      WORKER_ROLE: campaigns
+    volumes:
+      - ./src/_media:/app/_media
+      - ./src/_static:/app/_static
+      - ./app/license.key:/app/license.key
+      - /etc/machine-id:/etc/host-machine-id:ro
+    # Рассылка не обрывается по SIGTERM мгновенно: даём закрыть SMTP-соединение
+    # и попросить повтор, иначе кампания остаётся наполовину разосланной.
+    stop_grace_period: 60s
+    restart: unless-stopped
+    profiles:
+      # Воркер поднимается только явно (--profile worker): на этапе smoke-теста
+      # рядом с работающим Django его запускать нельзя — оба beat'а рассылали бы
+      # одни и те же кампании дважды.
+      - worker
+
+  # Расписание и сбор зависших кампаний. Один процесс, собственный beat.
+  cbmail-scheduler:
+    build:
+      context: .
+      dockerfile: _config/cbmail/Dockerfile
+    image: cbmail:latest
+    container_name: cbmail-scheduler
+    command: bash entrypoint-worker.sh
+    env_file:
+      - .env
+    environment:
+      LICENSE_FILE: /app/license.key
+      CELERY_BROKER_URL: redis://cb-mail-redis:6379/0
+      CELERY_RESULT_BACKEND: redis://cb-mail-redis:6379/0
+      PUBLIC_BASE_URL: ${CBMAIL_PUBLIC_URL:-http://81.177.139.113:8002}
+      WORKER_ROLE: maintenance
     volumes:
       - ./src/_media:/app/_media
       - ./src/_static:/app/_static
@@ -60,7 +95,6 @@ services:
       - /etc/machine-id:/etc/host-machine-id:ro
     restart: unless-stopped
     profiles:
-      # Воркер поднимается только явно (--profile worker): на этапе smoke-теста
-      # рядом с работающим Django его запускать нельзя — оба beat'а рассылали бы
-      # одни и те же кампании дважды.
+      # Тот же профиль: beat здесь, и поднимать его рядом с живым Django нельзя
+      # по той же причине — кампании ушли бы дважды.
       - worker

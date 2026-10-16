@@ -2,7 +2,9 @@
 {% block title %}{{ campaign.name }}{% endblock %}
 {% block head %}
 {# Пока рассылка идёт — страница сама обновляется, чтобы прогресс был виден без F5. #}
-{% if campaign.status == 'sending' %}<meta http-equiv="refresh" content="10">{% endif %}
+{# Обновляем и в очереди: именно там человек ждёт изменений и жмёт F5 вручную,
+   решая, что страница «застыла». #}
+{% if campaign.status in ['sending','queued'] %}<meta http-equiv="refresh" content="10">{% endif %}
 <style>
   .camp-hero { background: linear-gradient(135deg,#6f5cff 0%,#9c6bff 100%); color:#fff; border-radius:.5rem; }
   .camp-hero .badge { backdrop-filter: saturate(150%); }
@@ -53,6 +55,9 @@
     <form method="post" action="/campaigns/{{ c.id }}/stop" class="d-inline" onsubmit="return confirm('Остановить рассылку? Кампания сохранится.')">{{ csrf_input(request)|safe }}<button class="btn btn-warning"><i class="bx bx-stop-circle me-1"></i>Стоп</button></form>
     {% endif %}
     {% if c.status == 'sending' %}<span class="text-warning d-inline-flex align-items-center small"><span class="spinner-border spinner-border-sm me-1"></span>идёт отправка… <span class="text-body-secondary ms-1">(страница обновляется)</span></span>{% endif %}
+    {# Без этой строки ожидание места выглядит как поломка: статус есть,
+       а объяснения нет. #}
+    {% if c.status == 'queued' %}<span class="text-primary d-inline-flex align-items-center small"><span class="spinner-border spinner-border-sm me-1"></span>ждёт свободного места… <span class="text-body-secondary ms-1">(начнётся автоматически, страница обновляется)</span></span>{% endif %}
   </div>
 
   <!-- Плитки статистики -->

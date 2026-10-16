@@ -24,8 +24,10 @@ jobs:
           HOST: ${{ secrets.SSH_HOST }}
           PORT: ${{ secrets.SSH_PORT }}
           USER: ${{ secrets.SSH_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/emails-code' }}
         run: |
-          sshpass -e ssh -p "$PORT" -o StrictHostKeyChecking=no "$USER@$HOST" bash -s <<'REMOTE'
+          sshpass -e ssh -p "$PORT" -o StrictHostKeyChecking=no \
+            "$USER@$HOST" DEPLOY_PATH="$DEPLOY_PATH" bash -s <<'REMOTE'
           set -e
           PSQL="docker exec cb-mail-db psql -U admin -d db_admin -tAc"
           echo "=== combine_body в работающем образе (1 = новый код) ==="
@@ -40,4 +42,18 @@ jobs:
           $PSQL "select id || '  |  ' || coalesce(title,'') || '  | host=' || coalesce(email_host,'') || '  | login=' || coalesce(email_host_user,'') || '  | from=' || coalesce(default_from_email,'') from mail_usersettingssmtp order by id" || echo "нет профилей"
           echo "=== кампании (id | статус | from_email | smtp_id) ==="
           $PSQL "select id || '  |  ' || status || '  |  from=' || coalesce(from_email,'') || '  |  smtp=' || coalesce(use_smtp_settings_id::text,'-') from mail_massmailcampaign order by id desc limit 10" || echo "нет кампаний"
+          echo ""
+          echo "=== почему рассылки не уходят ==="
+          # Статус, причина переноса, занятость воркера и остаток суточной
+          # квоты ящика — рядом. Поодиночке все четыре состояния выглядят как
+          # «кампания висит», и разбирались они раньше вручную по четырём местам.
+          # Через docker cp, а не из образа: _config на сервер кладёт деплой,
+          # внутрь образа он не попадает.
+          cd "${DEPLOY_PATH:-/opt/emails-code}"
+          docker cp _config/campaigns-status.py cbmail-web:/tmp/campaigns-status.py
+          docker exec cbmail-web python /tmp/campaigns-status.py || true
+          echo ""
+          echo "=== планировщик (без него расписание не работает) ==="
+          docker inspect -f 'cbmail-scheduler запущен={{.State.Running}}' cbmail-scheduler \
+            || echo "контейнера cbmail-scheduler нет — запланированные кампании уходить не будут"
           REMOTE

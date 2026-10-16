@@ -21,6 +21,7 @@ TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 _STATUS_BADGE = {
     CampaignStatus.DRAFT.value: "secondary",
     CampaignStatus.SCHEDULED.value: "info",
+    CampaignStatus.QUEUED.value: "primary",
     CampaignStatus.SENDING.value: "warning",
     CampaignStatus.SENT.value: "success",
     CampaignStatus.CANCELLED.value: "danger",

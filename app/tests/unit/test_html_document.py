@@ -27,6 +27,7 @@ import re
 from cbmail.domain.composer import compose, html_to_text
 from cbmail.domain.html_document import (
     cap_images,
+    constrain_for_outlook,
     ensure_email_document,
     insert_into_body,
     is_full_document,
@@ -219,3 +220,51 @@ class TestTextVersion:
         assert "color:blue" not in text
         assert "Привет" in text
         assert "Пока" in text
+
+
+class TestOutlookFrame:
+    """Рамка, удерживающая ширину письма в Outlook.
+
+    Корневую таблицу конструктор ограничивает через ``max-width``, а движок
+    Word — он же Outlook для Windows и корпоративный OWA — этого свойства не
+    знает. Остаётся ``width:100%``, и письмо растягивается на всю ширину окна.
+    В браузере дефект не виден, поэтому замеры в Chromium его не находили, а
+    клиент на корпоративной почте видел его каждый раз.
+    """
+
+    BUILDER = (
+        '<table align="center" width="100%" style="margin:0 auto;max-width:600px" '
+        'role="presentation"><tr><td>письмо</td></tr></table>'
+    )
+
+    def test_width_is_constrained(self) -> None:
+        out = constrain_for_outlook(ensure_email_document(self.BUILDER))
+        assert '<!--[if mso]>' in out
+        assert 'width="600"' in out
+        assert "<!--[if mso]></td></tr></table><![endif]-->" in out
+
+    def test_author_width_is_respected(self) -> None:
+        wide = self.BUILDER.replace("max-width:600px", "max-width:900px")
+        assert 'width="900"' in constrain_for_outlook(ensure_email_document(wide))
+
+    def test_no_declared_width_no_frame(self) -> None:
+        out = constrain_for_outlook(
+            ensure_email_document('<table width="600"><tr><td>a</td></tr></table>')
+        )
+        assert "mso-email-frame" not in out
+
+    def test_repeated_call_adds_nothing(self) -> None:
+        once = constrain_for_outlook(ensure_email_document(self.BUILDER))
+        assert constrain_for_outlook(once) == once
+
+    def test_button_conditional_does_not_block_frame(self) -> None:
+        # Конструктор ставит условный комментарий вокруг отступов кнопки.
+        # Поиск просто по «[if mso]» счёл бы такое письмо уже обёрнутым.
+        with_button = self.BUILDER.replace("письмо", "<!--[if mso]><i></i><![endif]-->кнопка")
+        assert "mso-email-frame" in constrain_for_outlook(ensure_email_document(with_button))
+
+    def test_other_clients_see_unchanged_markup(self) -> None:
+        document = ensure_email_document(self.BUILDER)
+        out = constrain_for_outlook(document)
+        # Всё добавленное — комментарии: выкинув их, получаем исходный документ.
+        assert re.sub(r"<!--\[if mso\]>.*?<!\[endif\]-->", "", out, flags=re.DOTALL) == document

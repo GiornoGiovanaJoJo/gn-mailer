@@ -18,6 +18,7 @@ from html.parser import HTMLParser
 
 from cbmail.domain.html_document import (
     cap_images,
+    constrain_for_outlook,
     ensure_email_document,
     insert_into_body,
 )
@@ -126,8 +127,10 @@ def _wrap_html(
     ``</html>``: строгие почтовые клиенты такое выбрасывают, и получатель
     оставался без «Отписаться», ради которой подвал и добавляется.
 
-    Заодно письмо приводится к годному для почты виду: жёсткие ширины из старой
-    вёрстки становятся потолком, а в ``<head>`` появляются charset и viewport.
+    Заодно письмо приводится к годному для почты виду: в ``<head>`` появляется
+    кодировка, картинкам ставится потолок, а вокруг содержимого добавляется
+    рамка для Outlook. Сама вёрстка при этом не трогается — попытка «починить»
+    её на лету уже ломала письма у получателей, см. html_document.
     """
     document = ensure_email_document(cap_images(body))
     before = f"<div>{_escape_to_html(header)}</div>" if header and header.strip() else ""
@@ -136,7 +139,11 @@ def _wrap_html(
         tail.append(f"<div>{_escape_to_html(footer)}</div>")
     if add_unsubscribe:
         tail.append(_html_unsub_footer())
-    return insert_into_body(document, before=before, after="\n".join(tail))
+    # Рамка ставится последней, чтобы накрыть и шапку с подвалом: они тоже
+    # растягивались бы на всю ширину окна Outlook.
+    return constrain_for_outlook(
+        insert_into_body(document, before=before, after="\n".join(tail))
+    )
 
 
 def _escape_to_html(text: str) -> str:

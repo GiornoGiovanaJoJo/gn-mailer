@@ -156,6 +156,64 @@ def ensure_email_document(html: str) -> str:
     return html
 
 
+# Метка нашей рамки — чтобы повторный вызов не вложил вторую таблицу.
+#
+# Искать просто ``[if mso]`` нельзя: конструктор ставит такой же комментарий
+# вокруг отступов кнопки, и письмо с кнопкой осталось бы без рамки.
+_MSO_FRAME_MARK = "mso-email-frame"
+
+#: Объявленная автором ширина колонки письма, если она вообще объявлена.
+_ROOT_MAX_WIDTH_RE = re.compile(
+    r"<table\b[^>]*\bstyle\s*=\s*[\"'][^\"']*\bmax-width\s*:\s*(\d+)px", re.IGNORECASE
+)
+
+
+def outlook_frame_width(html: str) -> int | None:
+    """Ширина, на которую рассчитано письмо, — по первой таблице с ``max-width``.
+
+    Берём ровно то, что автор написал сам, и ничего не придумываем: шаблон на
+    900 px получит рамку в 900, а не приведётся к нашему представлению о норме.
+    Нет объявления — возвращаем ``None``, и рамки не будет.
+    """
+    match = _ROOT_MAX_WIDTH_RE.search(html or "")
+    if match is None:
+        return None
+    width = int(match.group(1))
+    return width if width > 0 else None
+
+
+def constrain_for_outlook(html: str) -> str:
+    """Удержать ширину письма в Outlook.
+
+    Конструктор задаёт корневую таблицу как ``width="100%"`` плюс
+    ``max-width:600px``. Движок Word, на котором работают Outlook для Windows и
+    корпоративный OWA, ``max-width`` не поддерживает вообще — остаётся
+    ``width:100%``, и письмо растягивается на всю ширину окна: текст
+    расползается и наезжает на картинки. Это и есть «на корпоративной почте
+    шаблон не держит форму»; в браузере дефект не виден, поэтому замеры в
+    Chromium его не находили.
+
+    Лечится единственным способом, который Word понимает, — условным
+    комментарием с таблицей фиксированной ширины вокруг содержимого. Для всех
+    остальных клиентов это обычный HTML-комментарий: разметка не меняется, и
+    правило «вёрстку не трогаем» остаётся в силе.
+    """
+    if not html or _MSO_FRAME_MARK in html:
+        return html
+    width = outlook_frame_width(html)
+    if width is None:
+        return html
+    return insert_into_body(
+        html,
+        before=(
+            f'<!--[if mso]><table role="presentation" class="{_MSO_FRAME_MARK}" '
+            f'align="center" width="{width}" cellpadding="0" cellspacing="0" border="0">'
+            "<tr><td align=\"center\"><![endif]-->"
+        ),
+        after="<!--[if mso]></td></tr></table><![endif]-->",
+    )
+
+
 def insert_into_body(html: str, *, before: str = "", after: str = "") -> str:
     """Положить разметку внутрь ``<body>``, а не рядом с документом.
 

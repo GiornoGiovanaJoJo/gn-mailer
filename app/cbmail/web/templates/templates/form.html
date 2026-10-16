@@ -22,6 +22,80 @@
           <label class="form-label" for="id_name">Название шаблона</label>
           <input type="text" class="form-control" id="id_name" name="name" value="{{ t.name if t else '' }}" placeholder="Например: Приветственное письмо">
         </div>
+        {#
+          Инструкция прямо над редактором.
+
+          Сам редактор — готовая сборка стороннего конструктора, его подписи
+          на английском, и перевести их, не пересобрав конструктор из
+          исходников, нельзя. Поэтому здесь не только шаги, но и словарик:
+          что как называется внутри. Без него люди месяц не могли настроить
+          шаблон и писали в поддержку.
+        #}
+        <div class="card border-primary mb-3" id="editor-help">
+          <div class="card-header d-flex justify-content-between align-items-center py-2">
+            <span class="fw-semibold"><i class="bx bx-help-circle me-1"></i>Как собрать письмо</span>
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="help-toggle">Свернуть</button>
+          </div>
+          <div class="card-body" id="help-body">
+            <p class="mb-2">
+              Письмо собирается из блоков, как из кубиков. Ничего не сломается:
+              пока вы не нажали «Сохранить», изменения никуда не уходят, а пока
+              не запустили рассылку — получателям ничего не отправляется.
+            </p>
+            <ol class="mb-3 ps-3">
+              <li class="mb-1">Впишите <b>название шаблона</b> — по нему вы найдёте его в списке.</li>
+              <li class="mb-1">В редакторе ниже нажмите серую полосу с плюсом — откроется список блоков: заголовок, текст, картинка, кнопка.</li>
+              <li class="mb-1"><b>Нажмите на блок</b> — справа появятся его настройки: текст, цвет, размер, отступы.</li>
+              <li class="mb-1">Наведите на блок — появятся стрелки (двигать), копия (дублировать) и корзина (удалить).</li>
+              <li class="mb-1">Значки монитора и телефона вверху редактора показывают, как письмо выглядит на компьютере и на телефоне. Посмотрите на обоих.</li>
+              <li class="mb-1">Нажмите <b>«Сохранить»</b> внизу страницы.</li>
+            </ol>
+
+            <p class="fw-semibold mb-1">Подписи в редакторе — на английском. Что они значат:</p>
+            <div class="table-responsive mb-3">
+              <table class="table table-sm table-bordered mb-0">
+                <tbody>
+                  <tr><td><code>Heading</code></td><td>заголовок</td><td><code>Divider</code></td><td>линия-разделитель</td></tr>
+                  <tr><td><code>Text</code></td><td>обычный текст</td><td><code>Spacer</code></td><td>пустой отступ</td></tr>
+                  <tr><td><code>Button</code></td><td>кнопка со ссылкой</td><td><code>Columns</code></td><td>несколько блоков в ряд</td></tr>
+                  <tr><td><code>Image</code></td><td>картинка</td><td><code>Container</code></td><td>рамка вокруг блоков</td></tr>
+                  <tr><td><code>Avatar</code></td><td>круглое фото</td><td><code>Html</code></td><td>готовый код письма</td></tr>
+                  <tr><td><code>Styles</code></td><td>настройки всего письма</td><td><code>Inspect</code></td><td>настройки выбранного блока</td></tr>
+                  <tr><td><code>Content</code></td><td>содержимое</td><td><code>Padding</code></td><td>отступы внутри блока</td></tr>
+                  <tr><td><code>Text color</code></td><td>цвет текста</td><td><code>Background color</code></td><td>цвет фона</td></tr>
+                  <tr><td><code>Font family</code></td><td>шрифт</td><td><code>Font size</code></td><td>размер шрифта</td></tr>
+                  <tr><td><code>Alignment</code></td><td>выравнивание</td><td><code>Border radius</code></td><td>скругление углов</td></tr>
+                  <tr><td><code>Source URL</code></td><td>адрес картинки</td><td><code>Upload image</code></td><td>загрузить картинку</td></tr>
+                  <tr><td><code>Alt text</code></td><td>подпись, если картинка не открылась</td><td><code>Preview</code></td><td>как увидит получатель</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <p class="fw-semibold mb-1">Подстановки — впишите прямо в текст письма:</p>
+            <ul class="mb-3 ps-3">
+              <li><code>{{ '{{email}}' }}</code> — адрес получателя, у каждого свой.</li>
+              <li><code>{{ '{{unsubscribe_url}}' }}</code> — ссылка «Отписаться». Вставлять не обязательно: если её нет, сервис добавит отписку в конец письма сам.</li>
+            </ul>
+            <p class="text-body-secondary small mb-3">
+              Скобки обязательны, буквы английские. Обращения по имени здесь нет —
+              в списке получателей хранятся только адреса.
+            </p>
+
+            <div class="alert alert-success mb-2 py-2">
+              <b>Обязательно перед рассылкой.</b> Отправьте письмо сначала себе
+              кнопкой «Проверить» на странице кампании и посмотрите, что пришло:
+              на рабочей почте (Outlook), на телефоне и в обычной почте (Mail.ru,
+              Яндекс). В разных почтовых программах письмо выглядит по-разному,
+              и предпросмотр в браузере этого не показывает.
+            </div>
+            <div class="alert alert-warning mb-0 py-2">
+              <b>Чего делать не надо.</b> Не вставляйте текст из Word обычным
+              копированием — вместе с текстом переносится оформление, и письмо
+              разъезжается; вставляйте через Ctrl+Shift+V. Не делайте письмо
+              шире обычного — на телефоне строки уедут за край экрана.
+            </div>
+          </div>
+        </div>
         <div id="editor-loading">Загрузка редактора…</div>
         <iframe id="editor-iframe" src="/static/moderation/libs/emailbuilder/index.html" style="display:none;" allowfullscreen></iframe>
         <textarea id="id_mask" name="mask">{{ t.mask if t and t.mask else '' }}</textarea>
@@ -37,6 +111,27 @@
 {% endblock %}
 {% block extra_js_bottom %}
 <script>
+  // Инструкция свёрнута, если человек уже сворачивал её раньше. По умолчанию
+  // развёрнута: тот, кто не знает, что делать, за подсказкой сам не потянется.
+  (function () {
+    const body = document.getElementById('help-body');
+    const toggle = document.getElementById('help-toggle');
+    if (!body || !toggle) return;
+    const KEY = 'cbmail.templateHelp.collapsed';
+    const apply = function (collapsed) {
+      body.style.display = collapsed ? 'none' : '';
+      toggle.textContent = collapsed ? 'Показать' : 'Свернуть';
+    };
+    let collapsed = false;
+    try { collapsed = localStorage.getItem(KEY) === '1'; } catch (e) { /* приватный режим */ }
+    apply(collapsed);
+    toggle.addEventListener('click', function () {
+      collapsed = !collapsed;
+      apply(collapsed);
+      try { localStorage.setItem(KEY, collapsed ? '1' : '0'); } catch (e) { /* приватный режим */ }
+    });
+  })();
+
   let editorReady = false;
   const iframe = document.getElementById('editor-iframe');
   const loading = document.getElementById('editor-loading');

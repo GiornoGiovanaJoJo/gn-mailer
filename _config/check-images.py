@@ -44,6 +44,17 @@ TIMEOUT_SECONDS = 15
 #: отключёнными картинками читает именно их.
 PLACEHOLDER_ALTS = {"sample product", "image", "img", "picture", "photo"}
 
+#: Мёртвая ссылка отписки: абсолютный адрес, где есть и слово unsubscribe, и
+#: подстановка адреса получателя. Такую кнопку оставила старая система, и
+#: ведёт она в никуда. Получатель жмёт «Отписаться», ничего не происходит — и
+#: жмёт «Спам», а это бьёт по репутации домена сильнее любой вёрстки.
+#:
+#: Оба условия обязательны. Рабочая ссылка сервиса — это плейсхолдер
+#: {{unsubscribe_url}}, адреса получателя в нём нет; а одного слова
+#: unsubscribe мало, под него попала бы живая страница отписки на сайте.
+_HREF_RE = re.compile(r"""\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.IGNORECASE)
+_EMAIL_PLACEHOLDER_RE = re.compile(r"\{\{\s*email\s*\}\}", re.IGNORECASE)
+
 _IMG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
 _SRC_RE = re.compile(r"""\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.IGNORECASE)
 _ALT_RE = re.compile(r"""\balt\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.IGNORECASE)
@@ -61,6 +72,23 @@ def find_images(html: str | None) -> list[tuple[str, str]]:
     if not html:
         return []
     return [(_attr(_SRC_RE, tag).strip(), _attr(_ALT_RE, tag).strip()) for tag in _IMG_RE.findall(html)]
+
+
+def find_dead_unsubscribe(html: str | None) -> list[str]:
+    """Ссылки отписки, оставшиеся от старой системы."""
+    if not html:
+        return []
+    out: list[str] = []
+    for match in _HREF_RE.finditer(html):
+        href = ((match.group(1) if match.group(1) is not None else match.group(2)) or "").strip()
+        low = href.lower()
+        if (
+            low.startswith(("http://", "https://"))
+            and "unsubscribe" in low
+            and _EMAIL_PLACEHOLDER_RE.search(href)
+        ):
+            out.append(href)
+    return out
 
 
 def check_url(url: str) -> tuple[bool, str]:
@@ -110,16 +138,35 @@ def main() -> int:
     # нескольких письмах, а ходить за ним повторно незачем.
     places: dict[str, list[str]] = defaultdict(list)
     alts: dict[str, set[str]] = defaultdict(set)
+    dead_unsub: dict[str, list[str]] = defaultdict(list)
 
     with OrmSession(get_sync_engine()) as session:
         for tpl in session.execute(select(MessageTemplate).order_by(MessageTemplate.id)).scalars():
+            where = f"шаблон #{tpl.id} «{tpl.name or 'без названия'}»"
             for url, alt in find_images(tpl.mask):
-                places[url].append(f"шаблон #{tpl.id} «{tpl.name or 'без названия'}»")
+                places[url].append(where)
                 alts[url].add(alt)
+            for href in find_dead_unsubscribe(tpl.mask):
+                dead_unsub[href].append(where)
         for camp in session.execute(select(Campaign).order_by(Campaign.id)).scalars():
+            where = f"кампания #{camp.id} «{camp.name}»"
             for url, alt in find_images(camp.message):
-                places[url].append(f"кампания #{camp.id} «{camp.name}»")
+                places[url].append(where)
                 alts[url].add(alt)
+            for href in find_dead_unsubscribe(camp.message):
+                dead_unsub[href].append(where)
+
+    if dead_unsub:
+        print("Ссылки «Отписаться» от старой системы — ведут в никуда:\n")
+        for href, where_list in dead_unsub.items():
+            ok, note = check_url(href.replace("{{email}}", "test@example.com"))
+            print(f"  {href}")
+            print(f"        {'отвечает' if ok else note}")
+            print(f"        где: {', '.join(sorted(set(where_list))[:4])}")
+        print("  Получатель жмёт «Отписаться», ничего не происходит — и жмёт «Спам».")
+        print("  Это бьёт по репутации домена сильнее любой вёрстки.")
+        print("  Почините в редакторе: вместо адреса впишите {{unsubscribe_url}}.")
+        print()
 
     if not places:
         print("Картинок в письмах нет.")
